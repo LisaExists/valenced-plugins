@@ -1,0 +1,24 @@
+{
+	"format": 1,
+	"id": "lisaexists.decor",
+	"name": "Decor",
+	"description": "Browse, upload, and apply custom profile decorations from Decor.",
+	"author": "LisaExists <836161010053283890>",
+	"contributors": [
+		"Fiery <890228870559698955>",
+		"Bwlok <501827585806827520>"
+	],
+	"icon": "StickerIcon",
+	"version": "1.0.0",
+	"dependencies": {
+		"valenced.api": {
+			"version": ">=1 <2"
+		},
+		"discord": {
+			"version": "*"
+		}
+	},
+	"dist": {
+		"script": "index.js"
+	}
+}
