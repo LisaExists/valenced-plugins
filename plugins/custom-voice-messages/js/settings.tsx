@@ -8,10 +8,10 @@ export default function SettingsComponent() {
     <Page>
       <Stack spacing={16}>
         <Text color="text-default" variant="text-md/medium">
-          Use /voice-message in the channel where you want to send audio. Choose a file and confirm to convert and send it as a voice message.
+          Hold the + button in chat and choose Voice Message. Select an audio file and confirm to convert and send it. Conversion and upload continue in the background, so you can keep chatting.
         </Text>
         <Text color="text-muted" variant="text-sm/normal">
-          Requires Android 10 or newer and Coco's Command Lib. Audio format support depends on your device.
+          Requires Android 10 or newer. Audio format support depends on your device.
         </Text>
       </Stack>
     </Page>

@@ -1,4 +1,4 @@
-import { ActionSheetActionCreators } from '@valenced/discord/actions'
+import { ActionSheetActionCreators, ToastActionCreators } from '@valenced/discord/actions'
 import { Tokens } from '@valenced/discord/common/tokens'
 import { Design } from '@valenced/discord/design'
 import { Clipboard } from '@valenced/externals/react-native-clipboard'
@@ -8,13 +8,13 @@ import {
 } from '@valenced/discord/utils/modules/finders'
 import { getModules } from '@valenced/modules/finders'
 import { withName, withProps } from '@valenced/modules/finders/filters'
-import { callNativeMethod, callNativeMethodSync } from '@valenced/modules/native'
+import { callNativeMethod } from '@valenced/modules/native'
 import { after, instead } from '@valenced/patcher'
 import { getErrorStack } from '@valenced/utils/error'
+import { lookupGeneratedIconComponent } from '@valenced/utils/discord'
 import { proxify } from '@valenced/utils/proxy'
 import { useEffect, useRef, useState } from 'react'
 import {
-  ActivityIndicator,
   Modal,
   Platform,
   ScrollView,
@@ -47,10 +47,17 @@ interface PreparedAudio {
   waveform: string
 }
 
-interface NativeProgress {
-  stage: string
-  progress: number | null
+interface ConversionProgress {
+  stage?: unknown
+  progress?: unknown
 }
+
+const PROGRESS_TOAST_KEY = 'CUSTOM_VOICE_MESSAGES_PROGRESS'
+const CONVERSION_PROGRESS_POLL_MS = 500
+const PROGRESS_TOAST_DURATION_MS = 10_000
+const FINAL_PROGRESS_TOAST_DURATION_MS = 3_200
+
+type ToastVariant = 'default' | 'success' | 'critical'
 
 interface TokenModule {
   getToken(): string
@@ -88,27 +95,6 @@ type MutableElement = {
   type: unknown
   props: { children?: ReactNode; [key: string]: unknown }
 }
-type ProgressView = { stage: string; progress: number | null }
-type Notice = { title: string; message: string }
-type CommandContext = { channel?: { id?: string } | null }
-type CommandResult = { content: string }
-type ApplicationCommand = {
-  name: string
-  displayName: string
-  description: string
-  displayDescription: string
-  applicationId: string
-  inputType: number
-  type: number
-  shouldHide: () => boolean
-  execute: (args: unknown[], context: CommandContext) =>
-    | void
-    | CommandResult
-    | Promise<void | CommandResult>
-}
-type CommandLib = {
-  commands: { registerCommand: (command: ApplicationCommand) => () => void }
-}
 
 const { ActionSheet, ActionSheetRow, Text: DesignText, Button: DesignButton } = Design
 let tokenModule: TokenModule | undefined
@@ -121,7 +107,6 @@ export default plugin({
   start(api) {
     const { cleanup, plugin } = api
     reportPluginError = error => plugin.reportError(error)
-
     cleanup(
       getModules(withProps<TokenModule>('getToken'), exports => {
         tokenModule = exports
@@ -133,9 +118,10 @@ export default plugin({
         'modules/chat_input/native/action_buttons/ChatInputActions.tsx',
         ({ default: ChatInputActions }) => {
           cleanup(
-            after(ChatInputActions, 'type', tree =>
-              addVoiceMessageModalHost(tree as ReactNode),
-            ),
+            after(ChatInputActions, 'type', tree => {
+              const withVoiceMessageOption = addVoiceMessageContextMenuOption(tree as ReactNode)
+              return addVoiceMessageModalHost(withVoiceMessageOption)
+            }),
           )
         },
       ),
@@ -146,15 +132,6 @@ export default plugin({
         reportPluginError = error => console.error('[CustomVoiceMessages]', error)
       },
     )
-
-    const commandLib = (api as unknown as {
-      unscoped?: { commandlib?: CommandLib }
-    }).unscoped?.commandlib
-    if (!commandLib?.commands?.registerCommand) {
-      plugin.reportError(new Error("Coco's Command Lib (dev.cocobo1.command-lib) is unavailable; make sure it is installed and enabled. The manifest now declares it as a dependency, but /voice-message could not be registered."))
-      return
-    }
-    cleanup(commandLib.commands.registerCommand(voiceMessageCommand()))
   },
   SettingsComponent,
 })
@@ -163,40 +140,13 @@ function addVoiceMessageModalHost(tree: ReactNode): ReactElement {
   return (
     <>
       {tree}
-      <VoiceMessageCommandHost key="lisaexists-custom-voice-message-command-host" />
+      <VoiceMessageFlowHost key="lisaexists-custom-voice-message-flow-host" />
     </>
   )
 }
 
-function voiceMessageCommand(): ApplicationCommand {
-  return {
-    name: 'voice-message',
-    displayName: 'voice-message',
-    description: 'Send an audio file as a Discord voice message',
-    displayDescription: 'Send an audio file as a Discord voice message',
-    applicationId: '-1',
-    inputType: 1,
-    type: 1,
-    shouldHide: () => false,
-    execute: (_args, context) => {
-      const channelId = context.channel?.id || getActiveChannelId()
-      if (!channelId) {
-        return { content: 'Open a Discord channel before using /voice-message.' }
-      }
-
-      const start = requestVoiceMessageFlow
-      if (!start || !start(channelId)) {
-        return { content: 'The voice-message flow is busy or the chat is not ready. Try again in the open channel.' }
-      }
-    },
-  }
-}
-
-function VoiceMessageCommandHost() {
+function VoiceMessageFlowHost() {
   const [confirmation, setConfirmation] = useState<PickedAudio | null>(null)
-  const [job, setJob] = useState<ProgressView | null>(null)
-  const [notice, setNotice] = useState<Notice | null>(null)
-  const [activeFilename, setActiveFilename] = useState<string | null>(null)
   const styles = useVoiceMessageModalStyles()
   const { width: viewportWidth } = useWindowDimensions()
   const busy = useRef(false)
@@ -220,53 +170,30 @@ function VoiceMessageCommandHost() {
     try {
       const picked = await callNativeMethod(`${PLUGIN_ID}.pickAudio`, []) as PickedAudio | null
       if (!picked) return
-      setActiveFilename(picked.displayName)
 
       const shouldSend = await confirmVoiceMessage(picked)
       if (!shouldSend) return
 
-      const jobId = createJobId()
-      setJob({ stage: 'Preparing audio', progress: 0 })
-      const poller = setInterval(() => {
-        try {
-          const nativeProgress = callNativeMethodSync(`${PLUGIN_ID}.progress`, [jobId]) as NativeProgress
-          if (nativeProgress && typeof nativeProgress.stage === 'string') {
-            setJob({
-              stage: nativeProgress.stage,
-              progress: isProgress(nativeProgress.progress) ? nativeProgress.progress : null,
-            })
-          }
-        } catch (error) {
-          clearInterval(poller)
-          reportPluginError(new Error(`Could not read audio conversion progress: ${getErrorStack(error)}`))
-        }
-      }, 180)
-
-      let prepared: PreparedAudio | undefined
-      try {
-        prepared = await callNativeMethod(`${PLUGIN_ID}.prepare`, [
-          picked.uri,
-          jobId,
-        ]) as PreparedAudio
-      } finally {
-        clearInterval(poller)
-        try {
-          callNativeMethodSync(`${PLUGIN_ID}.clearProgress`, [jobId])
-        } catch (error) {
-          reportPluginError(new Error(`Could not clear conversion progress: ${getErrorStack(error)}`))
-        }
-      }
+      showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Preparing audio for your voice message…', 'default', 2400)
+      const prepared = await prepareAudioWithProgress(picked.uri)
 
       let sendResult: { verifiedVoiceMessage: boolean }
       try {
         if (!prepared) throw new Error('The audio converter returned no prepared file.')
         validatePreparedAudio(prepared)
-        setJob({ stage: 'Uploading voice message', progress: 0.72 })
-        sendResult = await uploadAndSendVoiceMessage(
-          channelId,
-          prepared,
-          progress => setJob({ stage: 'Uploading voice message', progress: 0.72 + progress * 0.25 }),
-        )
+        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Audio prepared. Uploading voice message…', 'default', 2400)
+        let lastUploadBucket = -10
+        let lastUploadToastAt = 0
+        sendResult = await uploadAndSendVoiceMessage(channelId, prepared, fraction => {
+          const percent = Math.round(Math.max(0, Math.min(1, fraction)) * 100)
+          const bucket = Math.floor(percent / 10) * 10
+          const heartbeatDue = Date.now() - lastUploadToastAt >= 2_000
+          if (bucket >= lastUploadBucket + 10 || heartbeatDue) {
+            lastUploadBucket = bucket
+            lastUploadToastAt = Date.now()
+            showVoiceMessageToast(PROGRESS_TOAST_KEY, `Uploading voice message · ${bucket}%`, 'default', PROGRESS_TOAST_DURATION_MS)
+          }
+        })
       } finally {
         if (prepared && typeof prepared.uri === 'string') {
           await callNativeMethod(`${PLUGIN_ID}.cleanupPrepared`, [prepared.uri]).catch(error => {
@@ -276,24 +203,13 @@ function VoiceMessageCommandHost() {
       }
 
       if (sendResult.verifiedVoiceMessage) {
-        setJob({ stage: 'Voice message sent', progress: 1 })
-        await wait(450)
-        setJob(null)
-        setNotice({
-          title: 'Voice message sent',
-          message: 'Discord confirmed this message as a voice message.',
-        })
+        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Voice message sent.', 'success', FINAL_PROGRESS_TOAST_DURATION_MS)
       } else {
-        setJob(null)
-        setNotice({
-          title: 'Discord did not confirm a voice message',
-          message: 'The request was accepted, but its response did not contain the voice-message flag and metadata. Check the channel before trying again to avoid sending a duplicate.',
-        })
+        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Discord did not confirm the voice-message metadata. Check the channel before retrying.', 'critical', FINAL_PROGRESS_TOAST_DURATION_MS)
       }
     } catch (error) {
-      setJob(null)
       reportPluginError(new Error(`Could not send voice message: ${getErrorStack(error)}`))
-      setNotice({ title: 'Could not send voice message', message: getErrorMessage(error) })
+      showVoiceMessageToast(PROGRESS_TOAST_KEY, `Could not send voice message: ${getErrorMessage(error)}`, 'critical', 5_000)
     } finally {
       busy.current = false
     }
@@ -317,7 +233,6 @@ function VoiceMessageCommandHost() {
     }
   }, [])
 
-  const isFailureNotice = notice ? /could not|did not confirm|failed|error/i.test(notice.title) : false
   const useStackedActions = viewportWidth < 380
 
   return (
@@ -325,10 +240,9 @@ function VoiceMessageCommandHost() {
       animationType="fade"
       transparent
       statusBarTranslucent
-      visible={confirmation !== null || job !== null || notice !== null}
+      visible={confirmation !== null}
       onRequestClose={() => {
         if (confirmation !== null) finishConfirmation(false)
-        else if (notice !== null) setNotice(null)
       }}
     >
       <View style={styles.backdrop}>
@@ -393,87 +307,6 @@ function VoiceMessageCommandHost() {
                   />
                 </View>
               </>
-            ) : job !== null ? (
-              <>
-                <View style={styles.headerRow}>
-                  <View style={styles.iconTile}>
-                    <ActivityIndicator size="small" color={Tokens.default.colors.BACKGROUND_BRAND} />
-                  </View>
-                  <View style={styles.headerCopy}>
-                    <DesignText variant="heading-lg/semibold" color="text-strong">
-                      Sending voice message
-                    </DesignText>
-                    {activeFilename ? (
-                      <DesignText variant="text-sm/normal" color="text-muted" numberOfLines={1}>
-                        {activeFilename}
-                      </DesignText>
-                    ) : null}
-                  </View>
-                </View>
-
-                <View style={styles.stageCard}>
-                  <DesignText variant="text-md/medium" color="text-strong">
-                    {job.stage}
-                  </DesignText>
-                  <DesignText variant="text-sm/normal" color="text-muted">
-                    {job.progress !== null && job.progress >= 0.72 ? 'Uploading your audio to Discord…' : 'Preparing and encoding your audio…'}
-                  </DesignText>
-                </View>
-
-                {job.progress === null || job.progress === undefined ? (
-                  <View style={styles.indeterminateProgress}>
-                    <ActivityIndicator size="small" color={Tokens.default.colors.BACKGROUND_BRAND} />
-                    <DesignText variant="text-sm/medium" color="text-muted">Working…</DesignText>
-                  </View>
-                ) : (
-                  <>
-                    <View style={styles.progressMeta}>
-                      <DesignText variant="text-sm/medium" color="text-muted">
-                        {job.progress >= 0.72 ? 'Upload progress' : 'Conversion progress'}
-                      </DesignText>
-                      <DesignText variant="text-sm/semibold" color="text-strong">
-                        {Math.round(job.progress * 100)}%
-                      </DesignText>
-                    </View>
-                    <View
-                      style={styles.progressTrack}
-                      accessibilityRole="progressbar"
-                      accessibilityValue={{ min: 0, max: 100, now: Math.round(job.progress * 100) }}
-                    >
-                      <View style={[styles.progressFill, { width: `${Math.round(job.progress * 100)}%` }]} />
-                    </View>
-                  </>
-                )}
-
-                <DesignText variant="text-xs/normal" color="text-muted">
-                  Keep Discord open until the message is sent. Larger files may take a little longer to encode.
-                </DesignText>
-              </>
-            ) : notice !== null ? (
-              <>
-                <View style={styles.headerRow}>
-                  <View style={[styles.iconTile, isFailureNotice ? styles.failureIconTile : styles.successIconTile]}>
-                    <DesignText variant="heading-lg/semibold" color="text-strong" style={styles.noticeGlyph}>
-                      {isFailureNotice ? '!' : '✓'}
-                    </DesignText>
-                  </View>
-                  <View style={styles.headerCopy}>
-                    <DesignText variant="heading-lg/semibold" color="text-strong">
-                      {notice.title}
-                    </DesignText>
-                    <DesignText variant="text-sm/normal" color="text-muted">
-                      {notice.message}
-                    </DesignText>
-                  </View>
-                </View>
-                <DesignButton
-                  text="Close"
-                  variant="primary"
-                  size="lg"
-                  style={styles.closeButton}
-                  onPress={() => setNotice(null)}
-                />
-              </>
             ) : null}
           </ScrollView>
         </View>
@@ -489,10 +322,61 @@ function getActiveChannelId(): string | undefined {
   return typeof channelId === 'string' && channelId.length > 0 ? channelId : undefined
 }
 
+async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudio> {
+  let active = true
+  let lastStage = ''
+  let lastBucket = -1
+  let lastToastAt = 0
+  let bridgeWarningShown = false
+
+  const preparedPromise = callNativeMethod(`${PLUGIN_ID}.prepare`, [sourceUri]) as Promise<PreparedAudio>
+  const watcher = (async () => {
+    while (active) {
+      try {
+        const state = await callNativeMethod(`${PLUGIN_ID}.getPrepareProgress`, []) as ConversionProgress | null
+        if (!active) break
+        if (state && typeof state.stage === 'string' && state.stage.length > 0) {
+          let bucket: number | null = null
+          if (typeof state.progress === 'number' && Number.isFinite(state.progress)) {
+            const bounded = Math.max(0, Math.min(1, state.progress))
+            bucket = Math.floor(bounded * 10) * 10
+          }
+
+          const stageChanged = state.stage !== lastStage
+          const progressChanged = bucket !== null && (lastBucket < 0 || bucket >= lastBucket + 10)
+          const heartbeatDue = Date.now() - lastToastAt >= 2_000
+          if (stageChanged || progressChanged || heartbeatDue) {
+            const progressText = bucket === null ? '…' : ` · ${bucket}%`
+            showVoiceMessageToast(PROGRESS_TOAST_KEY, `${state.stage}${progressText}`, 'default', PROGRESS_TOAST_DURATION_MS)
+            lastStage = state.stage
+            if (bucket !== null) lastBucket = bucket
+            lastToastAt = Date.now()
+          }
+        }
+      } catch (error) {
+        if (!bridgeWarningShown) {
+          bridgeWarningShown = true
+          console.warn('[CustomVoiceMessages] Could not read conversion progress; conversion will continue without percentage updates.', getErrorStack(error))
+        }
+        return
+      }
+
+      if (active) await new Promise<void>(resolve => setTimeout(resolve, CONVERSION_PROGRESS_POLL_MS))
+    }
+  })()
+
+  try {
+    return await preparedPromise
+  } finally {
+    active = false
+    await watcher
+  }
+}
+
 async function uploadAndSendVoiceMessage(
   channelId: string,
   audio: PreparedAudio,
-  onProgress: (fraction: number) => void,
+  onUploadProgress: (fraction: number) => void,
 ): Promise<{ verifiedVoiceMessage: boolean }> {
   const token = tokenModule?.getToken()
   if (!token) throw new Error('Discord authentication is not available.')
@@ -516,7 +400,7 @@ async function uploadAndSendVoiceMessage(
   } as unknown as Blob)
 
   const url = `${apiBase}/channels/${encodeURIComponent(channelId)}/messages`
-  const message = await postMultipartMessage(url, token, body, onProgress)
+  const message = await postMultipartMessage(url, token, body, onUploadProgress)
   const attachment = message.attachments?.[0]
   const verifiedVoiceMessage =
     typeof message.flags === 'number' &&
@@ -534,7 +418,7 @@ function postMultipartMessage(
   url: string,
   token: string,
   body: FormData,
-  onProgress: (fraction: number) => void,
+  onUploadProgress: (fraction: number) => void,
 ): Promise<MessageLike> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest()
@@ -543,7 +427,7 @@ function postMultipartMessage(
     request.timeout = 120_000
     request.upload.onprogress = event => {
       if (event.lengthComputable && event.total > 0) {
-        onProgress(Math.min(1, Math.max(0, event.loaded / event.total)))
+        onUploadProgress(Math.max(0, Math.min(1, event.loaded / event.total)))
       }
     }
     request.onload = () => {
@@ -618,6 +502,223 @@ function validatePreparedAudio(audio: PreparedAudio): void {
   if (!Number.isFinite(audio.size) || audio.size <= 0) throw new Error('The converted audio file is empty.')
   if (!Number.isFinite(audio.durationSecs) || audio.durationSecs <= 0) throw new Error('The audio duration is invalid.')
   if (typeof audio.waveform !== 'string' || audio.waveform.length === 0) throw new Error('The audio waveform is missing.')
+}
+
+type AttachmentPickerMenuItem = {
+  label?: unknown
+  IconComponent?: unknown
+  action?: unknown
+  [key: string]: unknown
+}
+
+let pickerMenuMissReported = false
+let pickerMenuInjectionReported = false
+
+/**
+ * Discord's plus-button menu is a ContextMenu rendered by ChatInputActions,
+ * not a Design.ActionSheet. Its props.items entries have label, IconComponent,
+ * and action fields. Patch that data array before React renders the menu.
+ */
+function addVoiceMessageContextMenuOption(tree: ReactNode): ReactNode {
+  const items = findAttachmentPickerMenuItems(tree)
+  if (!items) {
+    if (!pickerMenuMissReported) {
+      pickerMenuMissReported = true
+      reportPluginError(new Error(
+        'Could not find the plus-menu ContextMenu items in ChatInputActions. The Discord attachment-picker structure may have changed.',
+      ))
+    }
+    return tree
+  }
+
+  if (items.some(isOurVoiceMessageMenuItem)) {
+    if (!pickerMenuInjectionReported) {
+      pickerMenuInjectionReported = true
+      console.log('[CustomVoiceMessages] Voice Message option is present in the plus-menu action list.')
+    }
+    return tree
+  }
+
+  const MicrophoneIcon = lookupGeneratedIconComponent('MicrophoneIcon')
+  if (!MicrophoneIcon) {
+    reportPluginError(new Error('Could not add Voice Message to the attachment picker: MicrophoneIcon is unavailable.'))
+    return tree
+  }
+
+  const voiceMessageItem: AttachmentPickerMenuItem = {
+    label: 'Voice Message',
+    IconComponent: MicrophoneIcon,
+    action: () => {
+      const channelId = getActiveChannelId()
+      if (!channelId) {
+        showVoiceMessageToast(
+          'CUSTOM_VOICE_MESSAGES_NO_CHANNEL',
+          'Open a channel before choosing Voice Message.',
+          'critical',
+        )
+        return
+      }
+
+      const start = requestVoiceMessageFlow
+      if (!start || !start(channelId)) {
+        showVoiceMessageToast(
+          'CUSTOM_VOICE_MESSAGES_BUSY',
+          'A voice message is already being prepared. Try again when it finishes.',
+          'critical',
+        )
+      }
+    },
+  }
+
+  const fileIndex = items.findIndex(isFilePickerMenuItem)
+  items.splice(fileIndex >= 0 ? fileIndex + 1 : items.length, 0, voiceMessageItem)
+  if (!pickerMenuInjectionReported) {
+    pickerMenuInjectionReported = true
+    console.log('[CustomVoiceMessages] Added Voice Message to the plus-menu action list.')
+  }
+  return tree
+}
+
+function findAttachmentPickerMenuItems(
+  value: unknown,
+  depth = 0,
+): AttachmentPickerMenuItem[] | undefined {
+  if (depth > 40 || value == null || typeof value !== 'object') return undefined
+
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      const found = findAttachmentPickerMenuItems(child, depth + 1)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const element = value as MutableElement
+  const props = element.props
+  const items = props?.items
+  if (Array.isArray(items) && isAttachmentPickerItems(items)) {
+    return items as AttachmentPickerMenuItem[]
+  }
+
+  return findAttachmentPickerMenuItems(props?.children, depth + 1)
+}
+
+function isAttachmentPickerItems(items: unknown[]): boolean {
+  const actionItems = items.filter(isAttachmentPickerMenuItem) as AttachmentPickerMenuItem[]
+  if (actionItems.length < 2) return false
+
+  const iconScore = actionItems.filter(item => {
+    const name = iconComponentName(item.IconComponent)
+    return /camera|image|photo|poll|app|attach|thread|calendar|media/i.test(name)
+  }).length
+
+  // Icon names are stable across locales; labels are a fallback for client builds
+  // that wrap generated icon components and hide their original names.
+  const labelScore = actionItems.filter(item => {
+    const label = normalizedLabel(item.label)
+    return /camera|photos?|bilder|fotos|galerie|poll|umfrage|abstimmung|apps?|anwendungen|files?|dateien|fichiers|archivos|attach|anhang/i.test(label)
+  }).length
+
+  return iconScore >= 2 || (actionItems.length >= 4 && labelScore >= 3)
+}
+
+function isAttachmentPickerMenuItem(value: unknown): value is AttachmentPickerMenuItem {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as AttachmentPickerMenuItem
+  return (
+    typeof item.label === 'string' &&
+    typeof item.action === 'function' &&
+    item.IconComponent != null &&
+    (typeof item.IconComponent === 'function' || typeof item.IconComponent === 'object')
+  )
+}
+
+function isOurVoiceMessageMenuItem(value: unknown): boolean {
+  if (!isAttachmentPickerMenuItem(value)) return false
+  return normalizedLabel(value.label) === 'voice message'
+}
+
+function isFilePickerMenuItem(value: unknown): boolean {
+  if (!isAttachmentPickerMenuItem(value)) return false
+  const icon = iconComponentName(value.IconComponent)
+  const label = normalizedLabel(value.label)
+  return /attachment|attach/i.test(icon) || /^(files?|dateien|fichiers|archivos|anhang|attach files?)$/.test(label)
+}
+
+function iconComponentName(value: unknown): string {
+  if (typeof value === 'function') {
+    const component = value as { displayName?: unknown; name?: unknown }
+    return `${typeof component.displayName === 'string' ? component.displayName : ''} ${typeof component.name === 'string' ? component.name : ''}`.trim()
+  }
+  if (value && typeof value === 'object') {
+    const component = value as {
+      displayName?: unknown
+      name?: unknown
+      type?: { displayName?: unknown; name?: unknown } | null
+      render?: { displayName?: unknown; name?: unknown } | null
+    }
+    return [component.displayName, component.name, component.type?.displayName, component.type?.name, component.render?.displayName, component.render?.name]
+      .filter((part): part is string => typeof part === 'string')
+      .join(' ')
+  }
+  return ''
+}
+
+function normalizedLabel(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLocaleLowerCase() : ''
+}
+
+function showVoiceMessageToast(
+  key: string,
+  text: string,
+  variant: ToastVariant = 'default',
+  duration = 3200,
+): void {
+  try {
+    const displayedText = key === PROGRESS_TOAST_KEY ? formatProgressToastText(text) : text
+    const displayedDuration = key === PROGRESS_TOAST_KEY && variant === 'default'
+      ? PROGRESS_TOAST_DURATION_MS
+      : duration
+
+    // Keep the progress toast content as a short, ordinary string. Reopening the same
+    // Valenced toast key refreshes its lifetime and replaces its message without relying
+    // on a nested React component being kept mounted by Discord's toast renderer.
+    ToastActionCreators.open(key, {
+      text: displayedText,
+      variant,
+      duration: displayedDuration,
+    })
+  } catch (error) {
+    console.warn('[CustomVoiceMessages] Could not show status toast', getErrorStack(error))
+  }
+}
+
+function formatProgressToastText(text: string): string {
+  if (text === 'Preparing audio for your voice message…') return 'Preparing voice message…'
+  if (text === 'Audio prepared. Uploading voice message…') return 'Uploading voice message…'
+
+  const progress = text.match(/^(.*?)\s*·\s*(\d{1,3})%$/)
+  if (progress) {
+    const [, rawStage, percent] = progress
+    const stage = rawStage.trim()
+    const label = /^uploading voice message$/i.test(stage)
+      ? 'Uploading'
+      : shortConversionStage(stage)
+    return `${label} · ${percent}%`
+  }
+
+  const stageOnly = text.match(/^(.*?)(?:\s*·\s*)?…$/)
+  if (stageOnly) return `${shortConversionStage(stageOnly[1].trim())}…`
+
+  return text
+}
+
+function shortConversionStage(stage: string): string {
+  const normalized = stage.toLocaleLowerCase()
+  if (normalized.includes('calculating') || normalized.includes('ready')) return 'Finishing audio'
+  if (normalized.includes('decoding') || normalized.includes('encoding') || normalized.includes('converting')) return 'Converting audio'
+  if (normalized.includes('inspect') || normalized.includes('starting') || normalized.includes('prepar')) return 'Preparing audio'
+  return 'Preparing audio'
 }
 
 function patchMessageActionSheet(report: (error: unknown) => void): () => void {
@@ -710,18 +811,6 @@ function normalizeApiBase(value: string): string {
   return 'https://discord.com/api/v9'
 }
 
-function createJobId(): string {
-  return `cvm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-function isProgress(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
-}
-
-function wait(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message
   if (typeof error === 'string') return error
@@ -786,10 +875,6 @@ const useVoiceMessageModalStyles = proxify(() =>
       fontSize: 22,
       lineHeight: 26,
     },
-    noticeGlyph: {
-      fontSize: 24,
-      lineHeight: 28,
-    },
     headerCopy: {
       flex: 1,
       gap: 5,
@@ -848,61 +933,13 @@ const useVoiceMessageModalStyles = proxify(() =>
     actionButtonStacked: {
       width: '100%',
     },
-    stageCard: {
-      gap: 5,
-      padding: 15,
-      borderRadius: 14,
-      backgroundColor: Tokens.default.colors.BACKGROUND_SURFACE_HIGHEST,
-      borderWidth: 1,
-      borderColor: Tokens.default.colors.BORDER_SUBTLE,
-    },
-    indeterminateProgress: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-      minHeight: 24,
-    },
-    progressMeta: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 12,
-      marginBottom: -10,
-    },
-    progressTrack: {
-      width: '100%',
-      height: 8,
-      borderRadius: 4,
-      overflow: 'hidden',
-      backgroundColor: Tokens.default.colors.BACKGROUND_SURFACE_HIGHEST,
-    },
-    progressFill: {
-      height: 8,
-      borderRadius: 4,
-      backgroundColor: Tokens.default.colors.BACKGROUND_BRAND,
-    },
-    failureIconTile: {
-      borderColor: Tokens.default.colors.BORDER_SUBTLE,
-    },
-    successIconTile: {
-      borderColor: Tokens.default.colors.BORDER_SUBTLE,
-    },
-    closeButton: {
-      alignSelf: 'stretch',
-      marginTop: 2,
-    },
   }),
 )
 
 declare module '@valenced/modules/native' {
   interface NativeMethods {
     'lisaexists.custom-voice-messages.pickAudio': [[], PickedAudio | null]
-    'lisaexists.custom-voice-messages.prepare': [
-      [sourceUri: string, jobId: string],
-      PreparedAudio,
-    ]
-    'lisaexists.custom-voice-messages.progress': [[jobId: string], NativeProgress]
-    'lisaexists.custom-voice-messages.clearProgress': [[jobId: string], null]
+    'lisaexists.custom-voice-messages.prepare': [[sourceUri: string], PreparedAudio]
     'lisaexists.custom-voice-messages.cleanupPrepared': [[uri: string], null]
     'lisaexists.custom-voice-messages.download':
       [[url: string, filename: string, mimeType: string], boolean]

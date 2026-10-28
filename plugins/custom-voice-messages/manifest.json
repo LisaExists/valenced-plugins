@@ -2,23 +2,20 @@
   "format": 1,
   "id": "lisaexists.custom-voice-messages",
   "name": "Custom Voice Messages",
-  "description": "Send audio files as Discord voice messages with /voice-message.",
+  "description": "Send audio files as Discord voice messages from the attachment picker.",
   "icon": "MicrophoneIcon",
   "author": "LisaExists",
   "contributors": [
     "Dziurwa",
-    "シグマ siguma"
+    "\u30b7\u30b0\u30de siguma"
   ],
-  "version": "1.0.0",
+  "version": "1.1.5",
   "dependencies": {
     "valenced.api": {
       "version": ">=1 <2"
     },
     "discord": {
       "version": "*"
-    },
-    "dev.cocobo1.command-lib": {
-      "version": ">=1 <2"
     }
   },
   "dist": {
