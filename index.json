@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "name": "Lisa's Repository",
+  "description": "A collection of my sloppy ports :3",
+  "plugins": {
+    "lisaexists.custom-voice-messages": {
+      "name": "Custom Voice Messages",
+      "description": "Send audio files as Discord voice messages with /voice-message.",
+      "author": "LisaExists",
+      "contributors": [
+        "Dziurwa",
+        "シグマ siguma"
+      ],
+      "icon": "MicrophoneIcon",
+      "channels": {
+        "latest": "1.0.0"
+      },
+      "versions": {
+        "1.0.0": {
+          "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.0.0.zip",
+          "sha256": "0af80962d7f040f7e9633519d34eea9d85f6d13dc95310f4ce2876085c7e38d1",
+          "size": 40632,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            },
+            "dev.cocobo1.command-lib": {
+              "version": ">=1 <2"
+            }
+          }
+        }
+      }
+    }
+  }
+}
