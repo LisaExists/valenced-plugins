@@ -8,6 +8,7 @@ import java.util.concurrent.Callable
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
 import org.jetbrains.kotlin.gradle.dsl.KotlinAndroidProjectExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.library) apply false
@@ -167,8 +168,8 @@ configure(subprojects.filter { project -> pluginRoots.any { project.path.startsW
         compileSdk = compileSdkVer.toInt()
         defaultConfig { minSdk = minSdkVer.toInt() }
         compileOptions {
-            sourceCompatibility = JavaVersion.toVersion(javaVer)
-            targetCompatibility = JavaVersion.toVersion(javaVer)
+            sourceCompatibility = JavaVersion.VERSION_17
+            targetCompatibility = JavaVersion.VERSION_17
         }
         sourceSets {
             named("main") { kotlin.directories += "src/main/kotlin" }
@@ -177,6 +178,9 @@ configure(subprojects.filter { project -> pluginRoots.any { project.path.startsW
 
     extensions.configure<KotlinAndroidProjectExtension> {
         jvmToolchain(javaVer.toInt())
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
     }
 
     // AGP's lint tasks require the module's build.gradle as an input, which these script-less modules don't have.
