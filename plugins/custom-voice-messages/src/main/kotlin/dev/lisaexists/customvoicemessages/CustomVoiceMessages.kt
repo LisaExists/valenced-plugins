@@ -8,27 +8,23 @@ import android.net.Uri
 import android.os.Environment
 import app.valenced.plugins.plugin
 import app.valenced.xposed.api.registerNativeAsyncMethod
-import app.valenced.xposed.api.registerNativeMethod
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 
 private var activePicker: AudioDocumentPicker? = null
 private var activeContextReady: CompletableDeferred<Context>? = null
-private var activeProgressStates: ConcurrentHashMap<String, Map<String, Any?>>? = null
+@Volatile private var activeConversionProgress: Map<String, Any?>? = null
 
 @Suppress("unused")
 val customVoiceMessagesPlugin = plugin {
     start {
         val contextReady = CompletableDeferred<Context>()
-        val progressStates = ConcurrentHashMap<String, Map<String, Any?>>()
         val picker = AudioDocumentPicker { message -> log.i(message) }
         activePicker = picker
         activeContextReady = contextReady
-        activeProgressStates = progressStates
 
         withAppContext { context ->
             contextReady.complete(context.applicationContext ?: context)
@@ -43,37 +39,21 @@ val customVoiceMessagesPlugin = plugin {
             val context = contextReady.await()
             val sourceUri = args.getOrNull(0) as? String
                 ?: throw IllegalArgumentException("A selected audio-file URI is required.")
-            val jobId = args.getOrNull(1) as? String
-                ?: throw IllegalArgumentException("An audio conversion job ID is required.")
-            require(jobId.matches(Regex("[A-Za-z0-9_-]{1,100}"))) { "The audio conversion job ID is invalid." }
 
-            progressStates[jobId] = mapOf("stage" to "Starting audio conversion", "progress" to 0.0)
+            activeConversionProgress = mapOf("stage" to "Starting conversion", "progress" to 0.0)
             try {
                 withContext(Dispatchers.IO) {
-                    AudioTranscoder.prepare(context, sourceUri) { stage, fraction ->
-                        progressStates[jobId] = mapOf(
-                            "stage" to stage,
-                            "progress" to fraction,
-                        )
+                    AudioTranscoder.prepare(context, sourceUri) { stage, progress ->
+                        activeConversionProgress = mapOf("stage" to stage, "progress" to progress)
                     }
                 }
-            } catch (error: Exception) {
-                progressStates.remove(jobId)
-                throw error
+            } finally {
+                activeConversionProgress = null
             }
         }
 
-        registerNativeMethod("${manifest.id}.progress") { args ->
-            val jobId = args.getOrNull(0) as? String
-                ?: throw IllegalArgumentException("An audio conversion job ID is required.")
-            progressStates[jobId] ?: mapOf("stage" to "Preparing audio", "progress" to null)
-        }
-
-        registerNativeMethod("${manifest.id}.clearProgress") { args ->
-            val jobId = args.getOrNull(0) as? String
-                ?: throw IllegalArgumentException("An audio conversion job ID is required.")
-            progressStates.remove(jobId)
-            null
+        registerNativeAsyncMethod("${manifest.id}.getPrepareProgress") {
+            activeConversionProgress
         }
 
         registerNativeAsyncMethod("${manifest.id}.cleanupPrepared") { args ->
@@ -116,16 +96,15 @@ val customVoiceMessagesPlugin = plugin {
             }
         }
 
-        log.i("Loaded ${manifest.name}; voice messages are sent with the /voice-message command.")
+        log.i("Loaded ${manifest.name}; use Voice Message in the chat attachment picker.")
     }
 
     stop {
         activePicker?.close()
         activePicker = null
+        activeConversionProgress = null
         activeContextReady?.cancel(CancellationException("Custom Voice Messages was unloaded."))
         activeContextReady = null
-        activeProgressStates?.clear()
-        activeProgressStates = null
         log.i("Unloaded ${manifest.id}")
     }
 }
