@@ -46,6 +46,34 @@
           }
         }
       }
+    },
+    "lisaexists.decor": {
+      "name": "Decor",
+      "description": "Browse, upload, and apply custom profile decorations from Decor.",
+      "author": "LisaExists <836161010053283890>",
+      "contributors": [
+        "Fiery <890228870559698955>",
+        "Bwlok <501827585806827520>"
+      ],
+      "icon": "StickerIcon",
+      "channels": {
+        "latest": "1.0.0"
+      },
+      "versions": {
+        "1.0.0": {
+          "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.decor@1.0.0.zip",
+          "sha256": "4cd358d1673963ac6790f7b03d803e2d18c895a2be8b634d444b9429cbec02c7",
+          "size": 12408,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        }
+      }
     }
   }
 }
