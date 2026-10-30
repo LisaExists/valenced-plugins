@@ -24,6 +24,7 @@ internal object AudioTranscoder {
     private const val MIME_OPUS = "audio/opus"
     private const val MIME_OGG = "audio/ogg"
     private const val MAX_DURATION_US = 20L * 60L * 1_000_000L
+    private const val INPUT_PREFIX = "cvm-input-"
     private const val PCM_PREFIX = "cvm-pcm-"
     private const val OUTPUT_PREFIX = "cvm-voice-"
     private const val TEMP_RETENTION_MS = 24L * 60L * 60L * 1_000L
@@ -34,23 +35,31 @@ internal object AudioTranscoder {
         onProgress: (stage: String, progress: Double?) -> Unit = { _, _ -> },
     ): Map<String, Any> {
         require(source.isNotBlank()) { "The selected audio file has no URI." }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw IllegalStateException(
-                "This Android version cannot create an Opus/Ogg output with the platform MediaMuxer. Android 10 (API 29) or newer is required.",
-            )
-        }
-
         cleanStaleFiles(context.cacheDir)
-        onProgress("Inspecting audio format", 0.03)
         val token = UUID.randomUUID().toString()
+        val stagedInput = File(context.cacheDir, "$INPUT_PREFIX$token.tmp")
         val pcmFile = File(context.cacheDir, "$PCM_PREFIX$token.pcm")
         val oggFile = File(context.cacheDir, "$OUTPUT_PREFIX$token.ogg")
+        var stagedInputFile: File? = null
         var completed = false
 
         try {
-            val compatibleSource = inspectCompatibleOggOpus(context, source)
+            // ACTION_OPEN_DOCUMENT grants access to the selected URI, not to the whole
+            // media library. Copy it into the app-private cache first so MediaExtractor
+            // and codec providers do not have to reopen a provider URI throughout decode.
+            val workingSource = if (Uri.parse(source).scheme.equals("content", ignoreCase = true)) {
+                onProgress("Opening selected audio", 0.01)
+                val copiedInput = copyContentUriToCache(context, source, stagedInput, onProgress)
+                stagedInputFile = copiedInput
+                Uri.fromFile(copiedInput).toString()
+            } else {
+                source
+            }
+
+            onProgress("Inspecting audio format", 0.03)
+            val compatibleSource = inspectCompatibleOggOpus(context, workingSource)
             onProgress("Decoding audio", 0.05)
-            val metadata = decodeToPcm(context, source, pcmFile, onProgress)
+            val metadata = decodeToPcm(context, workingSource, pcmFile, onProgress)
             onProgress("Calculating duration and waveform", 0.68)
             require(pcmFile.isFile && pcmFile.length() > 0L) {
                 "The selected file did not produce any decoded audio samples."
@@ -60,7 +69,8 @@ internal object AudioTranscoder {
             val preparedSize: Long
             if (compatibleSource != null) {
                 // Preserve already-compatible Ogg/Opus bytes; decoding above is only to derive
-                // real duration and waveform metadata for the upload payload.
+                // real duration and waveform metadata for the upload payload. If the source was
+                // staged, keep the cache copy until cleanupPrepared runs after upload.
                 preparedUri = compatibleSource.uri
                 preparedSize = compatibleSource.size
             } else {
@@ -70,6 +80,8 @@ internal object AudioTranscoder {
                 }
                 preparedUri = Uri.fromFile(oggFile).toString()
                 preparedSize = oggFile.length()
+                stagedInputFile?.delete()
+                stagedInputFile = null
             }
 
             onProgress("Audio ready to send", 1.0)
@@ -84,12 +96,67 @@ internal object AudioTranscoder {
             )
         } catch (e: Exception) {
             throw IllegalStateException(
-                "Could not prepare a genuine voice message from this audio. Check that Android has a decoder for the input and an Opus encoder: ${e.message ?: e.javaClass.simpleName}",
+                "Could not prepare a genuine voice message from this audio. Check that Android can decode the selected input. Details: ${e.message ?: e.javaClass.simpleName}",
                 e,
             )
         } finally {
             pcmFile.delete()
             if (!completed) oggFile.delete()
+            if (!completed) stagedInputFile?.delete()
+        }
+    }
+
+    private fun copyContentUriToCache(
+        context: Context,
+        source: String,
+        destination: File,
+        onProgress: (stage: String, progress: Double?) -> Unit,
+    ): File {
+        val uri = Uri.parse(source)
+        val expectedBytes = try {
+            queryContentSize(context.contentResolver, uri)
+        } catch (_: Exception) {
+            0L
+        }
+        var copiedBytes = 0L
+        var lastProgressAt = 0L
+
+        try {
+            val input = context.contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException(
+                    "Android could not open the selected audio document. Please select the file again from the system picker.",
+                )
+            BufferedInputStream(input, 64 * 1024).use { stream ->
+                FileOutputStream(destination).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = stream.read(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        output.write(buffer, 0, read)
+                        copiedBytes += read.toLong()
+
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastProgressAt >= 200L) {
+                            val fraction = if (expectedBytes > 0L) {
+                                (copiedBytes.toDouble() / expectedBytes.toDouble()).coerceIn(0.0, 1.0) * 0.03
+                            } else {
+                                null
+                            }
+                            onProgress("Copying selected audio", fraction)
+                            lastProgressAt = now
+                        }
+                    }
+                }
+            }
+            require(copiedBytes > 0L && destination.isFile && destination.length() > 0L) {
+                "The selected audio document is empty or could not be read."
+            }
+            onProgress("Copying selected audio", if (expectedBytes > 0L) 0.03 else null)
+            return destination
+        } catch (error: Exception) {
+            destination.delete()
+            throw error
         }
     }
 
@@ -357,8 +424,57 @@ internal object AudioTranscoder {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16_384)
         }
 
-        val encoderName = MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format)
-            ?: throw IllegalStateException("No compatible Android Opus encoder is available on this device.")
+        // ALL_CODECS is intentionally broader than REGULAR_CODECS. Some Android builds
+        // expose an Opus encoder outside the regular-codec list; if none can be used,
+        // fall back to the bundled pure-Java Concentus encoder rather than stopping here.
+        val encoderName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                MediaCodecList(MediaCodecList.ALL_CODECS).findEncoderForFormat(format)
+            }.getOrNull()
+        } else {
+            // MediaMuxer gained Ogg output in API 29; earlier Android versions use the
+            // software path directly because the Ogg writer does not need MediaMuxer.
+            null
+        }
+        var platformError: Exception? = null
+        if (encoderName != null) {
+            try {
+                encodeOpusOggWithAndroidCodec(pcmFile, outputFile, encoderName, onProgress)
+                return
+            } catch (error: Exception) {
+                outputFile.delete()
+                platformError = error
+                onProgress("Using software Opus encoder", 0.68)
+            }
+        } else {
+            onProgress("Using software Opus encoder", 0.68)
+        }
+
+        try {
+            SoftwareOpusEncoder.encode(pcmFile, outputFile, onProgress)
+        } catch (softwareError: Exception) {
+            platformError?.let(softwareError::addSuppressed)
+            throw IllegalStateException(
+                "Could not encode this audio as Opus. The Android encoder was unavailable or failed, and the bundled software encoder also failed: ${softwareError.message ?: softwareError.javaClass.simpleName}",
+                softwareError,
+            )
+        }
+    }
+
+    private fun encodeOpusOggWithAndroidCodec(
+        pcmFile: File,
+        outputFile: File,
+        encoderName: String,
+        onProgress: (stage: String, progress: Double?) -> Unit,
+    ) {
+        val format = MediaFormat.createAudioFormat(
+            MIME_OPUS,
+            Pcm16MonoResampler.OUTPUT_SAMPLE_RATE,
+            1,
+        ).apply {
+            setInteger(MediaFormat.KEY_BIT_RATE, 32_000)
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16_384)
+        }
         val encoder = MediaCodec.createByCodecName(encoderName)
         val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_OGG)
         var muxerStarted = false
@@ -467,7 +583,9 @@ internal object AudioTranscoder {
         val path = uri.path ?: return
         val root = context.cacheDir.canonicalFile
         val candidate = File(path).canonicalFile
-        if (candidate.parentFile == root && candidate.name.startsWith(OUTPUT_PREFIX)) {
+        if (candidate.parentFile == root &&
+            (candidate.name.startsWith(OUTPUT_PREFIX) || candidate.name.startsWith(INPUT_PREFIX))
+        ) {
             candidate.delete()
         }
     }
@@ -486,7 +604,9 @@ internal object AudioTranscoder {
     private fun cleanStaleFiles(cacheDir: File) {
         val cutoff = System.currentTimeMillis() - TEMP_RETENTION_MS
         cacheDir.listFiles()?.forEach { file ->
-            if ((file.name.startsWith(PCM_PREFIX) || file.name.startsWith(OUTPUT_PREFIX)) && file.lastModified() < cutoff) {
+            if ((file.name.startsWith(INPUT_PREFIX) || file.name.startsWith(PCM_PREFIX) || file.name.startsWith(OUTPUT_PREFIX)) &&
+                file.lastModified() < cutoff
+            ) {
                 file.delete()
             }
         }

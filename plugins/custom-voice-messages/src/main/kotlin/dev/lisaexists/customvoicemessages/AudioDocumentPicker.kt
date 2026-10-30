@@ -98,6 +98,19 @@ internal class AudioDocumentPicker(
             try {
                 val activity = activeActivity.get()
                     ?: throw IllegalStateException("Discord's activity disappeared while selecting audio.")
+                val resultIntent = data ?: throw IllegalStateException("Android's picker returned no result intent.")
+                val grantFlags = resultIntent.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                if ((resultIntent.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) != 0 &&
+                    (grantFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0
+                ) {
+                    try {
+                        activity.contentResolver.takePersistableUriPermission(uri, grantFlags)
+                    } catch (error: SecurityException) {
+                        // Some document providers grant temporary access only; that grant can
+                        // still be used for the current conversion, so do not reject the pick.
+                        logInfo("The selected provider did not allow a persistent audio URI grant: ${error.message}")
+                    }
+                }
                 deferred.complete(describeAudio(activity, uri))
             } catch (error: Exception) {
                 deferred.completeExceptionally(error)

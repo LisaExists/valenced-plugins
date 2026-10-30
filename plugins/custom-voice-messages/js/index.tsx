@@ -17,6 +17,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Modal,
   Platform,
+  Pressable,
   ScrollView,
   useWindowDimensions,
   View,
@@ -52,12 +53,34 @@ interface ConversionProgress {
   progress?: unknown
 }
 
+// CustomVoiceMessages registers these bridge methods from its Android plugin.
+// Declare their exact Valenced NativeMethods shapes so `lint:types` can validate
+// calls to this plugin's own native bridge instead of rejecting dynamic names.
+declare module '@valenced/modules/native' {
+  interface NativeMethods {
+    'lisaexists.custom-voice-messages.getPrepareProgress': [[], ConversionProgress | null]
+  }
+}
+
 const PROGRESS_TOAST_KEY = 'CUSTOM_VOICE_MESSAGES_PROGRESS'
 const CONVERSION_PROGRESS_POLL_MS = 500
-const PROGRESS_TOAST_DURATION_MS = 10_000
+const PROGRESS_TOAST_MAX_DURATION_MS = 24 * 60 * 60 * 1_000
 const FINAL_PROGRESS_TOAST_DURATION_MS = 3_200
 
 type ToastVariant = 'default' | 'success' | 'critical'
+
+interface ProgressToastState {
+  text: string
+  variant: ToastVariant
+}
+
+let progressToastOpen = false
+let progressToastCloseTimer: ReturnType<typeof setTimeout> | undefined
+let progressToastState: ProgressToastState = {
+  text: 'Preparing voice message…',
+  variant: 'default',
+}
+const progressToastListeners = new Set<() => void>()
 
 interface TokenModule {
   getToken(): string
@@ -81,12 +104,17 @@ interface Attachment {
 }
 
 interface MessageLike {
+  id?: string
+  channel_id?: string
+  channelId?: string
   flags?: number
   attachments?: Attachment[]
 }
 
 interface MessageActionSheetProps {
   message?: MessageLike
+  channelId?: string
+  channel?: { id?: string }
 }
 
 type LongPressMessageActionSheet = FC<MessageActionSheetProps>
@@ -174,14 +202,14 @@ function VoiceMessageFlowHost() {
       const shouldSend = await confirmVoiceMessage(picked)
       if (!shouldSend) return
 
-      showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Preparing audio for your voice message…', 'default', 2400)
+      showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Preparing audio for your voice message…')
       const prepared = await prepareAudioWithProgress(picked.uri)
 
       let sendResult: { verifiedVoiceMessage: boolean }
       try {
         if (!prepared) throw new Error('The audio converter returned no prepared file.')
         validatePreparedAudio(prepared)
-        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Audio prepared. Uploading voice message…', 'default', 2400)
+        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Audio prepared. Uploading voice message…')
         let lastUploadBucket = -10
         let lastUploadToastAt = 0
         sendResult = await uploadAndSendVoiceMessage(channelId, prepared, fraction => {
@@ -191,7 +219,7 @@ function VoiceMessageFlowHost() {
           if (bucket >= lastUploadBucket + 10 || heartbeatDue) {
             lastUploadBucket = bucket
             lastUploadToastAt = Date.now()
-            showVoiceMessageToast(PROGRESS_TOAST_KEY, `Uploading voice message · ${bucket}%`, 'default', PROGRESS_TOAST_DURATION_MS)
+            showVoiceMessageToast(PROGRESS_TOAST_KEY, `Uploading voice message · ${bucket}%`)
           }
         })
       } finally {
@@ -245,8 +273,15 @@ function VoiceMessageFlowHost() {
         if (confirmation !== null) finishConfirmation(false)
       }}
     >
-      <View style={styles.backdrop}>
-        <View style={styles.panel}>
+      <Pressable
+        style={styles.backdrop}
+        onPress={() => {
+          if (confirmation !== null) finishConfirmation(false)
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Cancel voice message confirmation"
+      >
+        <Pressable style={styles.panel} onPress={() => {}}>
           <View style={styles.accentBar} />
           <ScrollView
             bounces={false}
@@ -309,8 +344,8 @@ function VoiceMessageFlowHost() {
               </>
             ) : null}
           </ScrollView>
-        </View>
-      </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   )
 }
@@ -327,9 +362,16 @@ async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudi
   let lastStage = ''
   let lastBucket = -1
   let lastToastAt = 0
+  let lastToastText = 'Preparing audio for your voice message…'
   let bridgeWarningShown = false
 
   const preparedPromise = callNativeMethod(`${PLUGIN_ID}.prepare`, [sourceUri]) as Promise<PreparedAudio>
+  const heartbeat = setInterval(() => {
+    if (!active || Date.now() - lastToastAt < 2_000) return
+    showVoiceMessageToast(PROGRESS_TOAST_KEY, lastToastText)
+    lastToastAt = Date.now()
+  }, 2_000)
+
   const watcher = (async () => {
     while (active) {
       try {
@@ -347,7 +389,8 @@ async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudi
           const heartbeatDue = Date.now() - lastToastAt >= 2_000
           if (stageChanged || progressChanged || heartbeatDue) {
             const progressText = bucket === null ? '…' : ` · ${bucket}%`
-            showVoiceMessageToast(PROGRESS_TOAST_KEY, `${state.stage}${progressText}`, 'default', PROGRESS_TOAST_DURATION_MS)
+            lastToastText = `${state.stage}${progressText}`
+            showVoiceMessageToast(PROGRESS_TOAST_KEY, lastToastText)
             lastStage = state.stage
             if (bucket !== null) lastBucket = bucket
             lastToastAt = Date.now()
@@ -358,7 +401,7 @@ async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudi
           bridgeWarningShown = true
           console.warn('[CustomVoiceMessages] Could not read conversion progress; conversion will continue without percentage updates.', getErrorStack(error))
         }
-        return
+        // Keep the conversion alive and let the independent heartbeat retain a visible status.
       }
 
       if (active) await new Promise<void>(resolve => setTimeout(resolve, CONVERSION_PROGRESS_POLL_MS))
@@ -369,6 +412,7 @@ async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudi
     return await preparedPromise
   } finally {
     active = false
+    clearInterval(heartbeat)
     await watcher
   }
 }
@@ -511,7 +555,6 @@ type AttachmentPickerMenuItem = {
   [key: string]: unknown
 }
 
-let pickerMenuMissReported = false
 let pickerMenuInjectionReported = false
 
 /**
@@ -521,15 +564,10 @@ let pickerMenuInjectionReported = false
  */
 function addVoiceMessageContextMenuOption(tree: ReactNode): ReactNode {
   const items = findAttachmentPickerMenuItems(tree)
-  if (!items) {
-    if (!pickerMenuMissReported) {
-      pickerMenuMissReported = true
-      reportPluginError(new Error(
-        'Could not find the plus-menu ContextMenu items in ChatInputActions. The Discord attachment-picker structure may have changed.',
-      ))
-    }
-    return tree
-  }
+  // ChatInputActions may render before Discord has populated its menu items.
+  // Missing items on one render is expected: leave the tree untouched and try
+  // again on subsequent renders rather than reporting a plugin error.
+  if (!items) return tree
 
   if (items.some(isOurVoiceMessageMenuItem)) {
     if (!pickerMenuInjectionReported) {
@@ -541,33 +579,14 @@ function addVoiceMessageContextMenuOption(tree: ReactNode): ReactNode {
 
   const MicrophoneIcon = lookupGeneratedIconComponent('MicrophoneIcon')
   if (!MicrophoneIcon) {
-    reportPluginError(new Error('Could not add Voice Message to the attachment picker: MicrophoneIcon is unavailable.'))
+    console.warn('[CustomVoiceMessages] MicrophoneIcon is not available in this Discord build; skipping the plus-menu item for this render.')
     return tree
   }
 
   const voiceMessageItem: AttachmentPickerMenuItem = {
     label: 'Voice Message',
     IconComponent: MicrophoneIcon,
-    action: () => {
-      const channelId = getActiveChannelId()
-      if (!channelId) {
-        showVoiceMessageToast(
-          'CUSTOM_VOICE_MESSAGES_NO_CHANNEL',
-          'Open a channel before choosing Voice Message.',
-          'critical',
-        )
-        return
-      }
-
-      const start = requestVoiceMessageFlow
-      if (!start || !start(channelId)) {
-        showVoiceMessageToast(
-          'CUSTOM_VOICE_MESSAGES_BUSY',
-          'A voice message is already being prepared. Try again when it finishes.',
-          'critical',
-        )
-      }
-    },
+    action: () => startVoiceMessageFlow(getActiveChannelId()),
   }
 
   const fileIndex = items.findIndex(isFilePickerMenuItem)
@@ -577,6 +596,26 @@ function addVoiceMessageContextMenuOption(tree: ReactNode): ReactNode {
     console.log('[CustomVoiceMessages] Added Voice Message to the plus-menu action list.')
   }
   return tree
+}
+
+function startVoiceMessageFlow(channelId: string | undefined): void {
+  if (!channelId) {
+    showVoiceMessageToast(
+      'CUSTOM_VOICE_MESSAGES_NO_CHANNEL',
+      'Open a channel before choosing Voice Message.',
+      'critical',
+    )
+    return
+  }
+
+  const start = requestVoiceMessageFlow
+  if (!start || !start(channelId)) {
+    showVoiceMessageToast(
+      'CUSTOM_VOICE_MESSAGES_BUSY',
+      'A voice message is already being prepared. Try again when it finishes.',
+      'critical',
+    )
+  }
 }
 
 function findAttachmentPickerMenuItems(
@@ -596,30 +635,37 @@ function findAttachmentPickerMenuItems(
   const element = value as MutableElement
   const props = element.props
   const items = props?.items
-  if (Array.isArray(items) && isAttachmentPickerItems(items)) {
+  if (Array.isArray(items) && isAttachmentPickerItems(items, element.type)) {
     return items as AttachmentPickerMenuItem[]
   }
 
   return findAttachmentPickerMenuItems(props?.children, depth + 1)
 }
 
-function isAttachmentPickerItems(items: unknown[]): boolean {
+function isAttachmentPickerItems(items: unknown[], hostType: unknown): boolean {
   const actionItems = items.filter(isAttachmentPickerMenuItem) as AttachmentPickerMenuItem[]
-  if (actionItems.length < 2) return false
+  if (actionItems.length === 0) return false
+
+  // If Discord identifies the host as ContextMenu, accept a reduced item list.
+  // This matters in channels where camera/file/media actions are filtered out by
+  // permissions while SEND_VOICE_MESSAGES remains available.
+  const hostName = iconComponentName(hostType)
+  if (/context.?menu/i.test(hostName)) return true
 
   const iconScore = actionItems.filter(item => {
     const name = iconComponentName(item.IconComponent)
-    return /camera|image|photo|poll|app|attach|thread|calendar|media/i.test(name)
+    return /camera|image|photo|poll|app|attach|thread|calendar|media|file|voice|microphone|gallery|upload|sticker|gif/i.test(name)
   }).length
 
   // Icon names are stable across locales; labels are a fallback for client builds
-  // that wrap generated icon components and hide their original names.
+  // that wrap generated icon components and hide their original names. One strong
+  // signal is enough: attachment/media items can be absent when permissions filter them.
   const labelScore = actionItems.filter(item => {
     const label = normalizedLabel(item.label)
-    return /camera|photos?|bilder|fotos|galerie|poll|umfrage|abstimmung|apps?|anwendungen|files?|dateien|fichiers|archivos|attach|anhang/i.test(label)
+    return /camera|photos?|bilder|fotos|galerie|poll|umfrage|abstimmung|apps?|anwendungen|files?|dateien|fichiers|archivos|attach|anhang|media|voice|sticker|gif|upload/i.test(label)
   }).length
 
-  return iconScore >= 2 || (actionItems.length >= 4 && labelScore >= 3)
+  return iconScore >= 1 || labelScore >= 1
 }
 
 function isAttachmentPickerMenuItem(value: unknown): value is AttachmentPickerMenuItem {
@@ -675,22 +721,74 @@ function showVoiceMessageToast(
   duration = 3200,
 ): void {
   try {
-    const displayedText = key === PROGRESS_TOAST_KEY ? formatProgressToastText(text) : text
-    const displayedDuration = key === PROGRESS_TOAST_KEY && variant === 'default'
-      ? PROGRESS_TOAST_DURATION_MS
-      : duration
+    if (key !== PROGRESS_TOAST_KEY) {
+      ToastActionCreators.open(key, { text, variant, duration })
+      return
+    }
 
-    // Keep the progress toast content as a short, ordinary string. Reopening the same
-    // Valenced toast key refreshes its lifetime and replaces its message without relying
-    // on a nested React component being kept mounted by Discord's toast renderer.
-    ToastActionCreators.open(key, {
-      text: displayedText,
+    // The toast action creator opens a new notification on every call in some client
+    // versions; repeatedly calling it stacks stale progress notifications. Keep one
+    // mounted React content element and update its subscribed state instead.
+    progressToastState = {
+      text: formatProgressToastText(text),
       variant,
-      duration: displayedDuration,
-    })
+    }
+    for (const listener of progressToastListeners) listener()
+
+    if (!progressToastOpen) {
+      progressToastOpen = true
+      try {
+        ToastActionCreators.open(PROGRESS_TOAST_KEY, {
+          text: <ProgressToastContent />,
+          variant: 'default',
+          duration: PROGRESS_TOAST_MAX_DURATION_MS,
+        })
+      } catch (error) {
+        progressToastOpen = false
+        throw error
+      }
+    }
+
+    if (progressToastCloseTimer !== undefined) {
+      clearTimeout(progressToastCloseTimer)
+      progressToastCloseTimer = undefined
+    }
+
+    if (variant !== 'default') {
+      progressToastCloseTimer = setTimeout(() => {
+        progressToastCloseTimer = undefined
+        if (!progressToastOpen) return
+        try {
+          ToastActionCreators.close()
+        } catch (error) {
+          console.warn('[CustomVoiceMessages] Could not close completed progress toast', getErrorStack(error))
+        }
+        progressToastOpen = false
+      }, duration)
+    }
   } catch (error) {
     console.warn('[CustomVoiceMessages] Could not show status toast', getErrorStack(error))
   }
+}
+
+function ProgressToastContent() {
+  const [state, setState] = useState<ProgressToastState>(progressToastState)
+
+  useEffect(() => {
+    const update = () => setState({ ...progressToastState })
+    progressToastListeners.add(update)
+    update()
+    return () => {
+      progressToastListeners.delete(update)
+    }
+  }, [])
+
+  const color = state.variant === 'critical' ? 'text-feedback-critical' : 'text-strong'
+  return (
+    <DesignText variant="text-sm/normal" color={color}>
+      {state.text}
+    </DesignText>
+  )
 }
 
 function formatProgressToastText(text: string): string {
@@ -729,55 +827,83 @@ function patchMessageActionSheet(report: (error: unknown) => void): () => void {
     module => {
       const namespace = module as ModuleWithDefault
       const activeUnpatch = instead(namespace, 'default', (args, Original) => {
-        const tree = Reflect.apply(Original, undefined, args) as MutableElement | null
+        const originalTree = Reflect.apply(Original, undefined, args) as ReactNode
+        const tree = isMutableElement(originalTree) ? originalTree : undefined
         try {
           const props = args[0] as MessageActionSheetProps | undefined
           const message = props?.message
-          if (!tree || !message || typeof message.flags !== 'number') return tree
-          if ((message.flags & VOICE_MESSAGE_FLAG) === 0) return tree
-
-          const attachment = message.attachments?.[0]
-          if (!attachment || typeof attachment.url !== 'string') return tree
+          if (!tree || !message) return originalTree
 
           const sheet = findActionSheet(tree)
-          if (!sheet) return tree
+          if (!sheet) return originalTree
 
           const actionRows: ReactNode[] = []
-          if (Platform.OS === 'android') {
+          const channelId = firstString(
+            message.channel_id,
+            message.channelId,
+            props.channelId,
+            props.channel?.id,
+            getActiveChannelId(),
+          )
+
+          // Secondary route for accessibility and for channels where Discord hides
+          // the usual file/media actions. This uses the native accessible action-sheet row.
+          if (channelId) {
             actionRows.push(
               <ActionSheetRow
-                key="download-voice-message"
-                label="Download Voice Message"
+                key="send-audio-as-voice-message"
+                label="Send Audio as Voice Message"
                 onPress={() => {
                   ActionSheetActionCreators.hideActionSheet()
-                  void callNativeMethod(`${PLUGIN_ID}.download`, [
-                    attachment.url,
-                    attachment.filename ?? 'voice-message.ogg',
-                    attachment.content_type ?? 'audio/ogg',
-                  ]).catch(error => report(new Error(`Voice-message download failed: ${getErrorStack(error)}`)))
+                  startVoiceMessageFlow(channelId)
                 }}
               />,
             )
           }
-          actionRows.push(
-            <ActionSheetRow
-              key="copy-voice-message-url"
-              label="Copy Voice Message URL"
-              onPress={() => {
-                Clipboard.setString(attachment.url!)
-                ActionSheetActionCreators.hideActionSheet()
-              }}
-            />,
-          )
 
-          const group = <ActionSheetRow.Group>{actionRows}</ActionSheetRow.Group>
-          const children = [sheet.props.children].flat().filter(Boolean)
-          children.push(group)
-          sheet.props.children = children
+          const isVoiceMessage =
+            typeof message.flags === 'number' && (message.flags & VOICE_MESSAGE_FLAG) !== 0
+          const attachment = message.attachments?.[0]
+          const attachmentUrl = attachment?.url
+          if (isVoiceMessage && attachment && typeof attachmentUrl === 'string') {
+            if (Platform.OS === 'android') {
+              actionRows.push(
+                <ActionSheetRow
+                  key="download-voice-message"
+                  label="Download Voice Message"
+                  onPress={() => {
+                    ActionSheetActionCreators.hideActionSheet()
+                    void callNativeMethod(`${PLUGIN_ID}.download`, [
+                      attachmentUrl,
+                      attachment.filename ?? 'voice-message.ogg',
+                      attachment.content_type ?? 'audio/ogg',
+                    ]).catch(error => report(new Error(`Voice-message download failed: ${getErrorStack(error)}`)))
+                  }}
+                />,
+              )
+            }
+            actionRows.push(
+              <ActionSheetRow
+                key="copy-voice-message-url"
+                label="Copy Voice Message URL"
+                onPress={() => {
+                  Clipboard.setString(attachmentUrl)
+                  ActionSheetActionCreators.hideActionSheet()
+                }}
+              />,
+            )
+          }
+
+          if (actionRows.length > 0) {
+            const group = <ActionSheetRow.Group>{actionRows}</ActionSheetRow.Group>
+            const children = [sheet.props.children].flat().filter(Boolean)
+            children.push(group)
+            sheet.props.children = children
+          }
         } catch (error) {
           report(new Error(`Could not add voice-message actions: ${getErrorStack(error)}`))
         }
-        return tree
+        return originalTree
       })
       unpatches.push(activeUnpatch)
     },
@@ -788,6 +914,16 @@ function patchMessageActionSheet(report: (error: unknown) => void): () => void {
     unsubscribe()
     for (const unpatch of unpatches) unpatch()
   }
+}
+
+function isMutableElement(value: unknown): value is MutableElement {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const props = (value as { props?: unknown }).props
+  return !!props && typeof props === 'object'
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.length > 0)
 }
 
 function findActionSheet(value: unknown): MutableElement | undefined {
