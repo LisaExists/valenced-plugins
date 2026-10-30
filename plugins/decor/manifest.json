@@ -9,7 +9,7 @@
 		"Bwlok <501827585806827520>"
 	],
 	"icon": "StickerIcon",
-	"version": "1.0.0",
+	"version": "1.0.9",
 	"dependencies": {
 		"valenced.api": {
 			"version": ">=1 <2"

@@ -14,7 +14,11 @@ import DecorSettings from './ui/DecorSettings'
 import { cancelAuthorization } from './utils/authorization'
 import type { JsonStorageLike, LogLike } from './types'
 
-type PersistedAuth = { tokens: Record<string, string> }
+type PersistedAuth = {
+	tokens: Record<string, string>
+	// Decorated users seen recently, so they can paint right after launch.
+	decorations?: Record<string, string>
+}
 
 export default plugin<{ jsonStorage: PersistedAuth }>({
 	jsonStorage: { load: true, default: { tokens: {} } },

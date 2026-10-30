@@ -7,6 +7,8 @@ type TokenMap = Record<string, string>
 type AuthSnapshot = { accountId: string | null; token: string | null }
 
 let tokens: TokenMap = {}
+// Other persisted keys (e.g. the decoration cache) that must survive token saves.
+let extras: Record<string, unknown> = {}
 let snapshot: AuthSnapshot = { accountId: null, token: null }
 let storage: JsonStorageLike | undefined
 let logger: LogLike | undefined
@@ -19,7 +21,7 @@ function publish(): void {
 function save(): void {
 	if (!storage) return
 	void storage
-		.set({ tokens: { ...tokens } })
+		.set({ ...extras, tokens: { ...tokens } })
 		.catch(() => logger?.warn('Could not persist Decor authorization state.'))
 }
 
@@ -29,6 +31,9 @@ export function configureAuth(
 ): void {
 	storage = jsonStorage
 	logger = log
+	extras = Object.fromEntries(
+		Object.entries(jsonStorage.cache ?? {}).filter(([key]) => key !== 'tokens'),
+	)
 	const stored = jsonStorage.cache?.tokens
 	if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
 		tokens = Object.fromEntries(
@@ -38,6 +43,15 @@ export function configureAuth(
 		)
 	}
 	activateAccount(snapshot.accountId)
+}
+
+export function readExtra(key: string): unknown {
+	return extras[key]
+}
+
+export function writeExtra(key: string, value: unknown): void {
+	extras[key] = value
+	save()
 }
 
 export function activateAccount(accountId: string | null | undefined): void {

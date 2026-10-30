@@ -7,12 +7,16 @@
 
 import { Dispatcher } from '@valenced/discord/common/flux'
 import { getStore, onFluxEventDispatched } from '@valenced/discord/flux'
-import { getModules, lookupModule } from '@valenced/modules/finders'
+import { getModules } from '@valenced/modules/finders'
 import { withProps } from '@valenced/modules/finders/filters'
-import { instead } from '@valenced/patcher'
-import { ReactNative } from '@valenced/react'
-import { CDN_BASE, DECOR_SKU_ID, RAW_SKU_ID } from '../constants'
-import { activateAccount, getAuthSnapshot } from '../stores/auth'
+import { after, instead } from '@valenced/patcher'
+import { CDN_BASE, DECOR_SKU_ID } from '../constants'
+import {
+	activateAccount,
+	getAuthSnapshot,
+	readExtra,
+	writeExtra,
+} from '../stores/auth'
 import {
 	getCurrentUserState,
 	refreshCurrentUser,
@@ -20,425 +24,414 @@ import {
 } from '../stores/currentUser'
 import {
 	clearUserDecorations,
-	configureUserDecorations,
+	configureUserDecorationLogger,
+	flushUserDecorations,
+	getCachedUserDecorationIds,
 	getUserDecorationAsset,
+	loadPersistedDecorations,
 	queueUserDecorations,
+	setPersistHandler,
 	setUserDecorationAsset,
+	subscribeUserDecorationChanges,
 } from '../stores/users'
 import type { Decoration, LogLike } from '../types'
 
-type AnyRecord = Record<string, any>
+type AnyRecord = Record<string, unknown>
+type FluxPayload = { type: string; [key: string]: unknown }
 type Cleanup = (callback: () => void) => void
-let userStore: AnyRecord | undefined
-const currentSelections = new Map<string, Decoration | null>()
-const pendingCurrentSelections = new Set<string>()
-let integrationLogger: LogLike | undefined
+
+interface NativeUser {
+	id: string
+	avatarDecoration?: { asset?: string; skuId?: string } | null
+	avatarDecorationData?: { asset?: string; skuId?: string } | null
+	[key: string]: unknown
+}
+
+interface UserStoreLike {
+	getUser(id: string): NativeUser | undefined
+	getCurrentUser?(): NativeUser | undefined
+}
+
+interface DecorationMediaOptions {
+	avatarDecoration?: { asset?: string; skuId?: string } | null
+	canAnimate?: boolean
+}
+
+interface DecorationMediaResolver {
+	getAvatarDecorationURL(options: DecorationMediaOptions): string | undefined
+}
 
 function isRecord(value: unknown): value is AnyRecord {
-	return (
-		value !== null && (typeof value === 'object' || typeof value === 'function')
-	)
+	return value !== null && typeof value === 'object'
 }
 
-function decorationAssetUrl(
-	decoration: any,
-	canAnimate?: boolean,
-): string | undefined {
-	if (!decoration || typeof decoration.asset !== 'string') return undefined
-	if (decoration.skuId === DECOR_SKU_ID) {
-		let asset = decoration.asset
-		if (!/^(?:a_)?[a-f\d]{8,128}$/i.test(asset)) return undefined
-		if (!canAnimate && asset.startsWith('a_')) asset = asset.slice(2)
-		return `${CDN_BASE}/${asset}.png`
+function isValidUserId(value: unknown): value is string {
+	return typeof value === 'string' && /^\d{17,22}$/.test(value)
+}
+
+function assetOf(decoration: Decoration): string {
+	return (decoration.animated ? 'a_' : '') + decoration.hash
+}
+
+/**
+ * Use Discord's native user -> avatarDecoration -> media-resolver pipeline.
+ * CutoutableAvatarImage and all React Native avatar components remain untouched.
+ */
+function installNativeAvatarDecoration(
+	cleanup: Cleanup,
+	logger: LogLike,
+): void {
+	const nativeDecorations = new Map<string, {
+		avatarDecoration: NativeUser['avatarDecoration']
+		avatarDecorationData: NativeUser['avatarDecorationData']
+	}>()
+	const knownUsers = new Map<string, NativeUser>()
+	let userStore: UserStoreLike | undefined
+	let resolverReady = false
+	let disposed = false
+	let unpatchUserStore: (() => void)[] = []
+
+	const isValidAsset = (asset: unknown): asset is string =>
+		typeof asset === 'string' && /^(?:a_)?[a-f0-9]{8,128}$/i.test(asset)
+
+	const restoreNativeDecoration = (user: NativeUser): void => {
+		const snapshot = nativeDecorations.get(user.id)
+		if (!snapshot) return
+		user.avatarDecoration = snapshot.avatarDecoration
+		user.avatarDecorationData = snapshot.avatarDecorationData
 	}
-	if (
-		decoration.skuId === RAW_SKU_ID &&
-		/^(?:https?:|file:|content:|data:)/i.test(decoration.asset)
-	)
-		return decoration.asset
-	return undefined
-}
 
-function discordDecoration(
-	asset: string | null,
-): { asset: string; skuId: string } | null {
-	return asset ? { asset, skuId: DECOR_SKU_ID } : null
-}
+	const applyPluginDecoration = (user: NativeUser): NativeUser => {
+		if (!isValidUserId(user.id)) return user
+		knownUsers.set(user.id, user)
 
-function decorateUser(user: AnyRecord, asset: string | null): AnyRecord {
-	const avatarDecoration = asset
-		? discordDecoration(asset)
-		: user.avatarDecoration?.skuId === DECOR_SKU_ID
-			? null
-			: (user.avatarDecoration ?? null)
+		const asset = getUserDecorationAsset(user.id)
+		// An undefined cache entry means "not looked up yet"; never replace a
+		// native decoration until Decor has a confirmed selection for this ID.
+		if (asset === undefined) return user
 
-	try {
-		const descriptors = Object.getOwnPropertyDescriptors(user)
-		for (const key of ['avatarDecoration', 'avatarDecorationData']) {
-			const previous = descriptors[key]
-			descriptors[key] = {
-				configurable: true,
-				enumerable: previous?.enumerable ?? true,
-				writable: true,
-				value: avatarDecoration,
-			}
+		if (asset === null || !isValidAsset(asset)) {
+			restoreNativeDecoration(user)
+			return user
 		}
-		return Object.create(Object.getPrototypeOf(user), descriptors)
-	} catch {
 
+		// Do not expose Decor's private SKU to Discord until its native URL
+		// resolver has been found and safely patched.
+		if (!resolverReady) return user
+
+		const current = user.avatarDecoration
+		if (current?.skuId !== DECOR_SKU_ID) {
+			nativeDecorations.set(user.id, {
+				avatarDecoration: user.avatarDecoration,
+				avatarDecorationData: user.avatarDecorationData,
+			})
+		}
+
+		const selected = { asset, skuId: DECOR_SKU_ID }
+		if (current?.skuId !== DECOR_SKU_ID || current.asset !== asset) {
+			// Mutate only Discord's existing User instance. Spreading/cloning it
+			// would drop prototype methods such as getAvatarURL(), which native
+			// CutoutableAvatarImage calls during render.
+			user.avatarDecoration = selected
+			user.avatarDecorationData = selected
+		}
 		return user
 	}
+
+	const dispatchUserUpdate = (user: NativeUser): void => {
+		try {
+			void Dispatcher.dispatch({ type: 'USER_UPDATE', user }).catch(error => {
+				logger.warn(
+					'Could not refresh native avatar decoration for user ' + user.id + ': ' +
+					(error instanceof Error ? error.message : 'dispatch failed'),
+				)
+			})
+		} catch (error) {
+			logger.warn(
+				'Could not refresh native avatar decoration for user ' + user.id + ': ' +
+				(error instanceof Error ? error.message : 'dispatch failed'),
+			)
+		}
+	}
+
+	const refreshNativeUser = (id: string): void => {
+		if (disposed || !resolverReady || !userStore || !isValidUserId(id)) return
+		try {
+			const user = knownUsers.get(id) ?? userStore.getUser(id)
+			if (!user) return
+			applyPluginDecoration(user)
+			dispatchUserUpdate(user)
+		} catch (error) {
+			logger.warn(
+				'Could not apply native avatar decoration for user ' + id + ': ' +
+				(error instanceof Error ? error.message : 'unknown error'),
+			)
+		}
+	}
+
+	cleanup(
+		getStore<UserStoreLike>('UserStore', store => {
+			if (disposed) return
+			userStore = store
+
+			const unpatchGetUser = after(store, 'getUser', user => {
+				if (!user) return user
+				try {
+					return applyPluginDecoration(user)
+				} catch (error) {
+					logger.warn(
+						'Could not decorate UserStore result: ' +
+						(error instanceof Error ? error.message : 'unknown error'),
+					)
+					return user
+				}
+			})
+			unpatchUserStore.push(unpatchGetUser)
+			cleanup(unpatchGetUser)
+
+			// You Bar builds may retrieve the signed-in user through this method
+			// instead of getUser(currentUserId).
+			if (typeof store.getCurrentUser === 'function') {
+				const unpatchGetCurrentUser = after(
+					store as UserStoreLike & { getCurrentUser(): NativeUser | undefined },
+					'getCurrentUser',
+					user => {
+						if (!user) return user
+						try {
+							return applyPluginDecoration(user)
+						} catch (error) {
+							logger.warn(
+								'Could not decorate current UserStore result: ' +
+								(error instanceof Error ? error.message : 'unknown error'),
+							)
+							return user
+						}
+					},
+				)
+				unpatchUserStore.push(unpatchGetCurrentUser)
+				cleanup(unpatchGetCurrentUser)
+			}
+
+			if (resolverReady) {
+				for (const id of getCachedUserDecorationIds()) refreshNativeUser(id)
+			}
+			logger.log('Decor native UserStore hooks attached.')
+		}),
+	)
+
+	cleanup(
+		getModules(
+			withProps<AnyRecord>('getAvatarDecorationURL', 'default'),
+			exports => {
+				if (disposed) return
+				const namespace = exports as AnyRecord
+				const resolver = (
+					typeof namespace.getAvatarDecorationURL === 'function'
+						? namespace
+						: namespace.default
+				) as unknown as DecorationMediaResolver | undefined
+				if (!resolver || typeof resolver.getAvatarDecorationURL !== 'function') {
+					logger.warn('Decor found an invalid native avatar media resolver.')
+					return
+				}
+
+				const unpatchResolver = instead(
+					resolver,
+					'getAvatarDecorationURL',
+					function (args, original) {
+						const options = args[0] as DecorationMediaOptions | undefined
+						const decoration = options?.avatarDecoration
+						if (decoration?.skuId === DECOR_SKU_ID) {
+							if (!isValidAsset(decoration.asset))
+								return Reflect.apply(original, this, args)
+							const parts = decoration.asset.split('_')
+							if (!options?.canAnimate && parts[0] === 'a')
+								parts.shift()
+							return CDN_BASE + '/' + parts.join('_') + '.png'
+						}
+						return Reflect.apply(original, this, args)
+					},
+				)
+				cleanup(unpatchResolver)
+				resolverReady = true
+
+				for (const id of getCachedUserDecorationIds()) refreshNativeUser(id)
+				logger.log('Decor native avatar media resolver attached.')
+			},
+			{ returnNamespace: true, max: 1 },
+		),
+	)
+
+	cleanup(subscribeUserDecorationChanges(refreshNativeUser))
+
+	// When Discord sends a genuine USER_UPDATE while a plugin decoration is
+	// active, keep the new native values so removing Decor restores the latest
+	// server-provided decoration rather than an old snapshot.
+	cleanup(
+		onFluxEventDispatched<{ user?: NativeUser }>('USER_UPDATE', payload => {
+			const user = payload.user
+			if (
+				user &&
+				isValidUserId(user.id) &&
+				user.avatarDecoration?.skuId !== DECOR_SKU_ID &&
+				(nativeDecorations.has(user.id) || isValidAsset(getUserDecorationAsset(user.id)))
+			) {
+				nativeDecorations.set(user.id, {
+					avatarDecoration: user.avatarDecoration,
+					avatarDecorationData: user.avatarDecorationData,
+				})
+				knownUsers.set(user.id, user)
+			}
+			return payload
+		}),
+	)
+
+	cleanup(() => {
+		disposed = true
+		for (const [id, user] of knownUsers) {
+			try {
+				restoreNativeDecoration(user)
+				dispatchUserUpdate(user)
+			} catch {
+				logger.warn('Could not restore native avatar decoration for user ' + id + '.')
+			}
+		}
+		knownUsers.clear()
+		nativeDecorations.clear()
+		unpatchUserStore.forEach(unpatch => unpatch())
+		unpatchUserStore = []
+		userStore = undefined
+		resolverReady = false
+	})
+}
+
+function messageAuthorIds(payload: AnyRecord): unknown[] {
+	const messages = Array.isArray(payload.messages)
+		? payload.messages
+		: isRecord(payload.messages) && Array.isArray(payload.messages.messages)
+			? payload.messages.messages
+			: Array.isArray(payload.message)
+				? payload.message
+				: []
+	return messages.map((message: unknown) => {
+		if (!isRecord(message)) return undefined
+		const nested = isRecord(message.message) ? message.message : undefined
+		const author = isRecord(message.author)
+			? message.author
+			: nested && isRecord(nested.author)
+				? nested.author
+				: undefined
+		return author?.id ?? nested?.authorId
+	})
+}
+
+const PREFETCH: Record<
+	string,
+	{ ids: (payload: AnyRecord) => unknown[]; immediate?: boolean }
+> = {
+	USER_PROFILE_MODAL_OPEN: { ids: payload => [payload.userId], immediate: true },
+	USER_PROFILE_FETCH_START: { ids: payload => [payload.userId], immediate: true },
+	USER_PROFILE_FETCH_SUCCESS: {
+		ids: payload => [
+			isRecord(payload.userProfile) && isRecord(payload.userProfile.user)
+				? payload.userProfile.user.id
+				: isRecord(payload.user)
+					? payload.user.id
+					: undefined,
+		],
+		immediate: true,
+	},
+	LOAD_MESSAGES_SUCCESS: { ids: messageAuthorIds, immediate: true },
+	MESSAGE_CREATE: {
+		ids: payload => [
+			isRecord(payload.message) && isRecord(payload.message.author)
+				? payload.message.author.id
+				: isRecord(payload.message)
+					? payload.message.authorId
+					: undefined,
+		],
+		immediate: true,
+	},
+	MESSAGE_UPDATE: {
+		ids: payload => [
+			isRecord(payload.message) && isRecord(payload.message.author)
+				? payload.message.author.id
+				: isRecord(payload.message)
+					? payload.message.authorId
+					: undefined,
+		],
+		immediate: true,
+	},
 }
 
 export function installDiscordIntegration(
 	cleanup: Cleanup,
 	logger: LogLike,
 ): void {
-	integrationLogger = logger
+	configureUserDecorationLogger(logger)
+
+	// Hydrate plugin-local cache before attaching the native store hook so
+	// cached decorations can be applied as soon as UserStore becomes available.
+	loadPersistedDecorations(readExtra('decorations'))
+	setPersistHandler(snapshot => writeExtra('decorations', snapshot))
 	cleanup(() => {
-		integrationLogger = undefined
-		userStore = undefined
+		flushUserDecorations()
+		setPersistHandler(undefined)
 	})
+	installNativeAvatarDecoration(cleanup, logger)
+
 	cleanup(clearUserDecorations)
 	cleanup(() => resetCurrentUser(null))
-	const patched = new WeakSet<object>()
-	let userStoreFound = false
-	let resolverFound = false
-	let animationUtilityFound = false
-	const diagnostics = setTimeout(() => {
-		if (!userStoreFound)
-			logger.warn(
-				'UserStore was not found. Decor selection data can load, but Discord user metadata integration is inactive.',
-			)
-		if (!resolverFound)
-			logger.warn(
-				'Discord avatar decoration URL resolver was not found. Custom image URL handling is inactive.',
-			)
-		if (!animationUtilityFound)
-			logger.warn(
-				'Discord avatar decoration animation utility was not found. iOS local-file animation support is inactive.',
-			)
-	}, 8_000)
-	cleanup(() => clearTimeout(diagnostics))
 
-	const currentAccountId = (): string | null => {
-		try {
-			const user = userStore?.getCurrentUser?.()
-			return typeof user?.id === 'string' ? user.id : null
-		} catch {
-			return null
+	const safe =
+		(handler: (payload: AnyRecord) => void) =>
+		(payload: FluxPayload): FluxPayload => {
+			try {
+				if (isRecord(payload)) handler(payload)
+			} catch (error) {
+				logger.warn(
+					'Decor event handler failed: ' +
+					(error instanceof Error ? error.message : 'unknown error'),
+				)
+			}
+			return payload
 		}
+
+	const currentAccountId = (payload?: AnyRecord): string | null => {
+		const user = isRecord(payload?.user) ? payload.user : undefined
+		const id = user?.id ?? payload?.userId
+		return typeof id === 'string' ? id : null
 	}
 
-	const syncAccount = (clearCache: boolean): void => {
-		const accountId = currentAccountId()
-		const previous = getAuthSnapshot().accountId
-		if (clearCache && accountId !== previous) {
-			clearUserDecorations()
-			resetCurrentUser(accountId)
-			if (accountId) {
-				currentSelections.delete(accountId)
-				pendingCurrentSelections.add(accountId)
-			}
-		}
+	const syncAccount = (accountId: string | null): void => {
 		if (getCurrentUserState().accountId !== accountId)
 			resetCurrentUser(accountId)
 		activateAccount(accountId)
 		if (!accountId) return
 		if (getAuthSnapshot().token)
 			void refreshCurrentUser().catch(() => undefined)
-		else resetCurrentUser(accountId)
-		queueUserDecorations([accountId])
 	}
 
-	const applyReturnedUser = (user: unknown): unknown => {
-		if (!isRecord(user) || typeof user.id !== 'string') return user
-		let asset = getUserDecorationAsset(user.id)
-		if (user.id === getAuthSnapshot().accountId) {
-			if (pendingCurrentSelections.has(user.id)) {
-				queueUserDecorations([user.id])
-				return decorateUser(user, null)
-			}
-			const selected = currentSelections.get(user.id)
-			if (currentSelections.has(user.id))
-				asset = selected
-					? `${selected.animated ? 'a_' : ''}${selected.hash}`
-					: null
-		}
-		if (asset === undefined) {
-			queueUserDecorations([user.id])
-			return user
-		}
-		const current = user.avatarDecoration
-		if (current?.skuId === DECOR_SKU_ID && current.asset === asset) return user
-		return decorateUser(user, asset)
-	}
-
-	const attachUserStore = (store: AnyRecord): void => {
-		if (!isRecord(store) || patched.has(store)) return
-		if (
-			typeof store.getCurrentUser !== 'function' ||
-			typeof store.getUser !== 'function'
-		) {
-			logger.warn(
-				'UserStore was found without getCurrentUser/getUser; decoration metadata integration is inactive.',
-			)
-			return
-		}
-		userStore = store
-		userStoreFound = true
-		patched.add(store)
-		cleanup(
-			instead(
-				store as Record<string, (...args: any[]) => any>,
-				'getUser',
-				function (
-					this: unknown,
-					args: any[],
-					original: (...args: any[]) => any,
-				) {
-					const user = original.apply(this, args)
-					return applyReturnedUser(user)
-				},
-			),
-		)
-		cleanup(
-			instead(
-				store as Record<string, (...args: any[]) => any>,
-				'getCurrentUser',
-				function (
-					this: unknown,
-					args: any[],
-					original: (...args: any[]) => any,
-				) {
-					return applyReturnedUser(original.apply(this, args))
-				},
-			),
-		)
-		configureUserDecorations(
-			logger,
-			id => {
-				try {
-					return store.getUser(id)
-				} catch {
-					return undefined
-				}
-			},
-			(user, asset) => {
-				try {
-					if (user?.id === getAuthSnapshot().accountId)
-						pendingCurrentSelections.delete(user.id)
-					void Dispatcher.dispatch({
-						type: 'USER_UPDATE',
-						user: decorateUser(user, asset),
-					} as any).catch(error => {
-						logger.warn(
-							`Could not dispatch a user decoration update: ${error instanceof Error ? error.message : 'dispatch failed'}`,
-						)
-					})
-				} catch (error) {
-					logger.warn(
-						`Could not refresh a user decoration in Discord: ${error instanceof Error ? error.message : 'dispatch failed'}`,
-					)
-				}
-			},
-		)
-		syncAccount(false)
-		logger.log('User decoration metadata integration attached.')
-	}
-
-	cleanup(getStore<AnyRecord>('UserStore', attachUserStore))
-	const [existingUserStore] = lookupModule(
-		withProps('getCurrentUser', 'getUser'),
-		{ returnNamespace: true, initialize: false },
-	)
-	if (isRecord(existingUserStore)) attachUserStore(existingUserStore)
-	cleanup(
-		getModules(
-			withProps('getCurrentUser', 'getUser'),
-			exports => attachUserStore(exports as AnyRecord),
-			{ max: 16 },
-		),
-	)
-
-	const resolverTargets = new WeakSet<object>()
-	const attachResolver = (moduleExports: unknown): void => {
-		if (!isRecord(moduleExports)) return
-		const targets = [moduleExports.default, moduleExports]
-		for (const target of targets) {
-			if (
-				!isRecord(target) ||
-				typeof target.getAvatarDecorationURL !== 'function' ||
-				resolverTargets.has(target)
-			)
-				continue
-			resolverTargets.add(target)
-			resolverFound = true
-			cleanup(
-				instead(
-					target as Record<string, (...args: any[]) => any>,
-					'getAvatarDecorationURL',
-					function (
-						this: unknown,
-						args: any[],
-						original: (...args: any[]) => any,
-					) {
-						const [options] = args
-						const customUrl = decorationAssetUrl(
-							options?.avatarDecoration,
-							options?.canAnimate,
-						)
-						if (customUrl) return customUrl
-						return original.apply(this, args)
-					},
-				),
-			)
-			logger.log('Avatar decoration URL resolver attached.')
-		}
-	}
-	const [existingResolver] = lookupModule(withProps('getAvatarDecorationURL'), {
-		returnNamespace: true,
-		initialize: false,
-	})
-	attachResolver(existingResolver)
-	cleanup(
-		getModules(withProps('getAvatarDecorationURL'), attachResolver, { max: 8 }),
-	)
-
-	const animatedTargets = new WeakSet<object>()
-	const attachAnimationUtility = (moduleExports: unknown): void => {
-		if (!isRecord(moduleExports)) return
-		for (const target of [moduleExports.default, moduleExports]) {
-			if (
-				!isRecord(target) ||
-				typeof target.isAnimatedAvatarDecoration !== 'function' ||
-				animatedTargets.has(target)
-			)
-				continue
-			animatedTargets.add(target)
-			animationUtilityFound = true
-			cleanup(
-				instead(
-					target as Record<string, (...args: any[]) => any>,
-					'isAnimatedAvatarDecoration',
-					function (
-						this: unknown,
-						args: any[],
-						original: (...args: any[]) => any,
-					) {
-						const result = original.apply(this, args)
-						const decoration = args[0]
-						if (
-							ReactNative.Platform.OS === 'ios' &&
-							decoration?.skuId === RAW_SKU_ID &&
-							decoration?.asset?.startsWith('file://')
-						)
-							return true
-						return result
-					},
-				),
-			)
-		}
-	}
-	const [existingAnimationUtility] = lookupModule(
-		withProps('isAnimatedAvatarDecoration'),
-		{ returnNamespace: true, initialize: false },
-	)
-	attachAnimationUtility(existingAnimationUtility)
-	cleanup(
-		getModules(
-			withProps('isAnimatedAvatarDecoration'),
-			attachAnimationUtility,
-			{ max: 8 },
-		),
-	)
-
-	const onConnection = (payload: AnyRecord): AnyRecord => {
-		clearUserDecorations()
-		const id = currentAccountId()
-		resetCurrentUser(id)
-		activateAccount(id)
-		if (id) {
-			currentSelections.delete(id)
-			pendingCurrentSelections.add(id)
-		}
-		if (id && getAuthSnapshot().token)
-			void refreshCurrentUser().catch(() => undefined)
-		if (id) queueUserDecorations([id])
-
-		return payload
-	}
-	cleanup(onFluxEventDispatched('CONNECTION_OPEN', onConnection))
 	cleanup(
 		onFluxEventDispatched(
-			'USER_SETTINGS_ACCOUNT_SUBMIT_SUCCESS',
-			(payload: AnyRecord) => {
-				syncAccount(true)
-				return payload
-			},
+			'CONNECTION_OPEN',
+			safe(payload => syncAccount(currentAccountId(payload))),
 		),
 	)
-	cleanup(
-		onFluxEventDispatched('LOAD_MESSAGES_SUCCESS', (payload: AnyRecord) => {
-			const ids = Array.isArray(payload.messages)
-				? payload.messages.map((message: any) => message?.author?.id)
-				: []
-			queueUserDecorations(ids)
-			return payload
-		}),
-	)
-	cleanup(
-		onFluxEventDispatched('MESSAGE_CREATE', (payload: AnyRecord) => {
-			const id = payload.message?.author?.id
-			if (id) queueUserDecorations([id])
-			return payload
-		}),
-	)
-	cleanup(
-		onFluxEventDispatched('TYPING_START', (payload: AnyRecord) => {
-			if (payload.userId) queueUserDecorations([payload.userId])
-			return payload
-		}),
-	)
-	cleanup(
-		onFluxEventDispatched('USER_PROFILE_MODAL_OPEN', (payload: AnyRecord) => {
-			if (payload.userId) queueUserDecorations([payload.userId])
-			return payload
-		}),
-	)
+	for (const [type, spec] of Object.entries(PREFETCH))
+		cleanup(
+			onFluxEventDispatched(
+				type,
+				safe(payload => queueUserDecorations(spec.ids(payload), spec.immediate)),
+			),
+		)
 
-	syncAccount(false)
+	syncAccount(getCurrentUserState().accountId)
 }
 
 export function setCurrentDecorAsset(
 	accountId: string,
 	decoration: Decoration | null,
 ): void {
-	const asset = decoration
-		? `${decoration.animated ? 'a_' : ''}${decoration.hash}`
-		: null
-	setUserDecorationAsset(accountId, asset)
-	const previous = currentSelections.get(accountId)
-	if (
-		currentSelections.has(accountId) &&
-		previous?.hash === decoration?.hash &&
-		previous?.animated === decoration?.animated
-	)
-		return
-	currentSelections.set(accountId, decoration)
-	pendingCurrentSelections.delete(accountId)
-	try {
-		const user = userStore?.getUser(accountId)
-		if (user)
-			void Dispatcher.dispatch({
-				type: 'USER_UPDATE',
-				user: decorateUser(user, asset),
-			} as any).catch(error => {
-				integrationLogger?.warn(
-					`Could not dispatch the current user decoration update: ${error instanceof Error ? error.message : 'dispatch failed'}`,
-				)
-			})
-	} catch {
-
-	}
+	setUserDecorationAsset(accountId, decoration ? assetOf(decoration) : null)
 }

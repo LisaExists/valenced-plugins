@@ -10,18 +10,13 @@ import { useEffect, useState } from 'react'
 import {
 	ActivityIndicator,
 	FlatList,
-	Linking,
 	Pressable,
 	ScrollView,
 	StyleSheet,
 	View,
 } from 'react-native'
 import { errorMessage } from '../api'
-import {
-	DECOR_SKU_ID,
-	PLUGIN_VERSION,
-	SOURCE_URL,
-} from '../constants'
+import { DECOR_SKU_ID, PLUGIN_VERSION } from '../constants'
 import { setTokenForCurrentAccount, useAuthSnapshot } from '../stores/auth'
 import {
 	deleteOwnedDecoration,
@@ -30,9 +25,11 @@ import {
 	selectDecoration,
 	useCurrentUserState,
 } from '../stores/currentUser'
+import { useUsernames } from '../stores/usernames'
 import CreateDecoration from './CreateDecoration'
 import DecorationImage from './DecorationImage'
 import Presets from './Presets'
+import CreatedBy from './UserNames'
 import type { ReactNode } from 'react'
 import type { Decoration } from '../types'
 
@@ -133,6 +130,7 @@ function DecorationTile({
 export default function DecorSettings() {
 	const auth = useAuthSnapshot()
 	const current = useCurrentUserState()
+	const [accountName] = useUsernames(auth.accountId ? [auth.accountId] : [])
 	const [page, setPage] = useState<'main' | 'presets' | 'create'>('main')
 	const [routeAccountId, setRouteAccountId] = useState<string | null>(null)
 	const [authBusy, setAuthBusy] = useState(false)
@@ -337,7 +335,7 @@ export default function DecorSettings() {
 				) : (
 					<>
 						<Design.Text variant="eyebrow">
-							Connected as Discord account {auth.accountId}
+							Connected as {accountName}
 						</Design.Text>
 						<Design.Card
 							variant="secondary"
@@ -358,9 +356,7 @@ export default function DecorSettings() {
 								{current.selected?.alt || 'No decoration selected'}
 							</Design.Text>
 							{current.selected?.authorId ? (
-								<Design.Text>
-									Created by {current.selected.authorId}
-								</Design.Text>
+								<CreatedBy ids={[current.selected.authorId]} />
 							) : null}
 							{current.selected?.reviewed === false ? (
 								<Design.Text>Pending review</Design.Text>
@@ -461,15 +457,6 @@ export default function DecorSettings() {
 				</Design.TableRowGroup>
 			) : null}
 			<View style={styles.footer}>
-				<Design.Button
-					text="Original Decor source"
-					variant="tertiary"
-					onPress={() =>
-						void Linking.openURL(SOURCE_URL).catch(() =>
-							toast('Could not open the source link.'),
-						)
-					}
-				/>
 				<Design.Text variant="eyebrow">
 					Decor · Version {PLUGIN_VERSION}
 				</Design.Text>
