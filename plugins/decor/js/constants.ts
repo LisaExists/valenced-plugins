@@ -6,6 +6,4 @@ export const CDN_BASE = 'https://decorcdn.fieryflames.dev'.replace(/\/+$/, '')
 export const CLIENT_ID = '1096966363416899624'
 export const DECOR_SKU_ID = '100101099111114'
 export const RAW_SKU_ID = '11497119'
-export const SOURCE_URL =
-	'https://github.com/Valenced/valenced-community-plugins/tree/main/plugins/decor'
-export const PLUGIN_VERSION = '1.0.0'
+export const PLUGIN_VERSION = '1.0.8'

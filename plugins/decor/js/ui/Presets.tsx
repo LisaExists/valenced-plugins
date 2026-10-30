@@ -7,6 +7,7 @@ import { errorMessage, getPresets } from '../api'
 import { getAuthSnapshot } from '../stores/auth'
 import { selectDecoration } from '../stores/currentUser'
 import DecorationImage from './DecorationImage'
+import CreatedBy from './UserNames'
 import type { Decoration, Preset } from '../types'
 
 const styles = StyleSheet.create({
@@ -112,11 +113,7 @@ export default function Presets({
 					{preset.description ? (
 						<Design.Text>{preset.description}</Design.Text>
 					) : null}
-					{preset.authorIds.length ? (
-						<Design.Text variant="eyebrow">
-							Created by {preset.authorIds.join(', ')}
-						</Design.Text>
-					) : null}
+					<CreatedBy ids={preset.authorIds} variant="eyebrow" />
 					<FlatList
 						horizontal
 						data={preset.decorations}
