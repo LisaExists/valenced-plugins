@@ -5,7 +5,7 @@
   "plugins": {
     "lisaexists.custom-voice-messages": {
       "name": "Custom Voice Messages",
-      "description": "Send audio files as Discord voice messages from the attachment picker.",
+      "description": "Send audio files as Discord voice messages, including channels where file-picker actions are hidden.",
       "author": "LisaExists",
       "contributors": [
         "Dziurwa",
@@ -13,7 +13,7 @@
       ],
       "icon": "MicrophoneIcon",
       "channels": {
-        "latest": "1.1.5"
+        "latest": "1.1.10"
       },
       "versions": {
         "1.0.0": {
@@ -29,6 +29,19 @@
             },
             "dev.cocobo1.command-lib": {
               "version": ">=1 <2"
+            }
+          }
+        },
+        "1.1.10": {
+          "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.1.10.zip",
+          "sha256": "d87f036447b8c73db355abfab525d914c36e8df7aa763dbf7819cb7ebd1cca40",
+          "size": 48643,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
             }
           }
         },
