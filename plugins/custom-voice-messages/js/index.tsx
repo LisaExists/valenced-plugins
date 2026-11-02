@@ -1,13 +1,12 @@
-import { ActionSheetActionCreators, ToastActionCreators } from '@valenced/discord/actions'
+import { ToastActionCreators } from '@valenced/discord/actions'
 import { Tokens } from '@valenced/discord/common/tokens'
 import { Design } from '@valenced/discord/design'
-import { Clipboard } from '@valenced/externals/react-native-clipboard'
 import { Stores } from '@valenced/discord/flux'
 import {
   getModuleWithImportedPath,
 } from '@valenced/discord/utils/modules/finders'
 import { getModules } from '@valenced/modules/finders'
-import { withName, withProps } from '@valenced/modules/finders/filters'
+import { withProps } from '@valenced/modules/finders/filters'
 import { callNativeMethod } from '@valenced/modules/native'
 import { after, instead } from '@valenced/patcher'
 import { getErrorStack } from '@valenced/utils/error'
@@ -16,7 +15,6 @@ import { proxify } from '@valenced/utils/proxy'
 import { useEffect, useRef, useState } from 'react'
 import {
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   useWindowDimensions,
@@ -96,35 +94,21 @@ interface SelectedChannelStore {
 }
 
 interface Attachment {
-  url?: string
-  filename?: string
-  content_type?: string
   waveform?: string
   duration_secs?: number
 }
 
 interface MessageLike {
-  id?: string
-  channel_id?: string
-  channelId?: string
   flags?: number
   attachments?: Attachment[]
 }
 
-interface MessageActionSheetProps {
-  message?: MessageLike
-  channelId?: string
-  channel?: { id?: string }
-}
-
-type LongPressMessageActionSheet = FC<MessageActionSheetProps>
-type ModuleWithDefault = { default: LongPressMessageActionSheet }
 type MutableElement = {
   type: unknown
   props: { children?: ReactNode; [key: string]: unknown }
 }
 
-const { ActionSheet, ActionSheetRow, Text: DesignText, Button: DesignButton } = Design
+const { Text: DesignText, Button: DesignButton } = Design
 let tokenModule: TokenModule | undefined
 let apiBase = 'https://discord.com/api/v9'
 let reportPluginError: (error: unknown) => void = error => console.error('[CustomVoiceMessages]', error)
@@ -147,13 +131,12 @@ export default plugin({
         ({ default: ChatInputActions }) => {
           cleanup(
             after(ChatInputActions, 'type', tree => {
-              const withVoiceMessageOption = addVoiceMessageContextMenuOption(tree as ReactNode)
+              const withVoiceMessageOption = addVoiceMessagePlusMenuOption(tree as ReactNode)
               return addVoiceMessageModalHost(withVoiceMessageOption)
             }),
           )
         },
       ),
-      patchMessageActionSheet(error => reportPluginError(error)),
       () => {
         tokenModule = undefined
         requestVoiceMessageFlow = undefined
@@ -562,7 +545,7 @@ let pickerMenuInjectionReported = false
  * not a Design.ActionSheet. Its props.items entries have label, IconComponent,
  * and action fields. Patch that data array before React renders the menu.
  */
-function addVoiceMessageContextMenuOption(tree: ReactNode): ReactNode {
+function addVoiceMessagePlusMenuOption(tree: ReactNode): ReactNode {
   const items = findAttachmentPickerMenuItems(tree)
   // ChatInputActions may render before Discord has populated its menu items.
   // Missing items on one render is expected: leave the tree untouched and try
@@ -819,127 +802,6 @@ function shortConversionStage(stage: string): string {
   return 'Preparing audio'
 }
 
-function patchMessageActionSheet(report: (error: unknown) => void): () => void {
-  const unpatches: Array<() => void> = []
-
-  const unsubscribe = getModules(
-    withName<LongPressMessageActionSheet>('LongPressMessageActionSheet'),
-    module => {
-      const namespace = module as ModuleWithDefault
-      const activeUnpatch = instead(namespace, 'default', (args, Original) => {
-        const originalTree = Reflect.apply(Original, undefined, args) as ReactNode
-        const tree = isMutableElement(originalTree) ? originalTree : undefined
-        try {
-          const props = args[0] as MessageActionSheetProps | undefined
-          const message = props?.message
-          if (!tree || !message) return originalTree
-
-          const sheet = findActionSheet(tree)
-          if (!sheet) return originalTree
-
-          const actionRows: ReactNode[] = []
-          const channelId = firstString(
-            message.channel_id,
-            message.channelId,
-            props.channelId,
-            props.channel?.id,
-            getActiveChannelId(),
-          )
-
-          // Secondary route for accessibility and for channels where Discord hides
-          // the usual file/media actions. This uses the native accessible action-sheet row.
-          if (channelId) {
-            actionRows.push(
-              <ActionSheetRow
-                key="send-audio-as-voice-message"
-                label="Send Audio as Voice Message"
-                onPress={() => {
-                  ActionSheetActionCreators.hideActionSheet()
-                  startVoiceMessageFlow(channelId)
-                }}
-              />,
-            )
-          }
-
-          const isVoiceMessage =
-            typeof message.flags === 'number' && (message.flags & VOICE_MESSAGE_FLAG) !== 0
-          const attachment = message.attachments?.[0]
-          const attachmentUrl = attachment?.url
-          if (isVoiceMessage && attachment && typeof attachmentUrl === 'string') {
-            if (Platform.OS === 'android') {
-              actionRows.push(
-                <ActionSheetRow
-                  key="download-voice-message"
-                  label="Download Voice Message"
-                  onPress={() => {
-                    ActionSheetActionCreators.hideActionSheet()
-                    void callNativeMethod(`${PLUGIN_ID}.download`, [
-                      attachmentUrl,
-                      attachment.filename ?? 'voice-message.ogg',
-                      attachment.content_type ?? 'audio/ogg',
-                    ]).catch(error => report(new Error(`Voice-message download failed: ${getErrorStack(error)}`)))
-                  }}
-                />,
-              )
-            }
-            actionRows.push(
-              <ActionSheetRow
-                key="copy-voice-message-url"
-                label="Copy Voice Message URL"
-                onPress={() => {
-                  Clipboard.setString(attachmentUrl)
-                  ActionSheetActionCreators.hideActionSheet()
-                }}
-              />,
-            )
-          }
-
-          if (actionRows.length > 0) {
-            const group = <ActionSheetRow.Group>{actionRows}</ActionSheetRow.Group>
-            const children = [sheet.props.children].flat().filter(Boolean)
-            children.push(group)
-            sheet.props.children = children
-          }
-        } catch (error) {
-          report(new Error(`Could not add voice-message actions: ${getErrorStack(error)}`))
-        }
-        return originalTree
-      })
-      unpatches.push(activeUnpatch)
-    },
-    { returnNamespace: true },
-  )
-
-  return () => {
-    unsubscribe()
-    for (const unpatch of unpatches) unpatch()
-  }
-}
-
-function isMutableElement(value: unknown): value is MutableElement {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const props = (value as { props?: unknown }).props
-  return !!props && typeof props === 'object'
-}
-
-function firstString(...values: unknown[]): string | undefined {
-  return values.find((value): value is string => typeof value === 'string' && value.length > 0)
-}
-
-function findActionSheet(value: unknown): MutableElement | undefined {
-  if (!value || typeof value !== 'object') return undefined
-  if (Array.isArray(value)) {
-    for (const child of value) {
-      const found = findActionSheet(child)
-      if (found) return found
-    }
-    return undefined
-  }
-  const element = value as MutableElement
-  if (element.type === ActionSheet) return element
-  return findActionSheet(element.props?.children)
-}
-
 function normalizeApiBase(value: string): string {
   let base = value.trim()
   if (base.startsWith('//')) base = `https:${base}`
@@ -1077,7 +939,5 @@ declare module '@valenced/modules/native' {
     'lisaexists.custom-voice-messages.pickAudio': [[], PickedAudio | null]
     'lisaexists.custom-voice-messages.prepare': [[sourceUri: string], PreparedAudio]
     'lisaexists.custom-voice-messages.cleanupPrepared': [[uri: string], null]
-    'lisaexists.custom-voice-messages.download':
-      [[url: string, filename: string, mimeType: string], boolean]
   }
 }
