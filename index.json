@@ -13,7 +13,7 @@
       ],
       "icon": "MicrophoneIcon",
       "channels": {
-        "latest": "1.1.11"
+        "latest": "1.1.12"
       },
       "versions": {
         "1.0.0": {
@@ -49,6 +49,19 @@
           "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.1.11.zip",
           "sha256": "a4d630fc3f1d968d973e075dd8da848a690f990653d951f4acab46e9fbb403d2",
           "size": 45892,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        },
+        "1.1.12": {
+          "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.1.12.zip",
+          "sha256": "ba58c8551ce4592ce4a0c88a74fa667e8fb0c22ec2010c4047acdf39b80cb099",
+          "size": 45822,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
