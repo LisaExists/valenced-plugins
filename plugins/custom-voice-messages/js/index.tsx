@@ -8,7 +8,7 @@ import {
 import { getModules } from '@valenced/modules/finders'
 import { withProps } from '@valenced/modules/finders/filters'
 import { callNativeMethod } from '@valenced/modules/native'
-import { after, instead } from '@valenced/patcher'
+import { after } from '@valenced/patcher'
 import { getErrorStack } from '@valenced/utils/error'
 import { lookupGeneratedIconComponent } from '@valenced/utils/discord'
 import { proxify } from '@valenced/utils/proxy'
@@ -109,7 +109,7 @@ type MutableElement = {
 }
 
 const { Text: DesignText, Button: DesignButton } = Design
-let tokenModule: TokenModule | undefined
+let tokenModules = new Set<TokenModule>()
 let apiBase = 'https://discord.com/api/v9'
 let reportPluginError: (error: unknown) => void = error => console.error('[CustomVoiceMessages]', error)
 
@@ -121,7 +121,7 @@ export default plugin({
     reportPluginError = error => plugin.reportError(error)
     cleanup(
       getModules(withProps<TokenModule>('getToken'), exports => {
-        tokenModule = exports
+        tokenModules.add(exports)
       }),
       getModules(withProps<ApiBaseModule>('getAPIBaseURL', 'del'), exports => {
         apiBase = normalizeApiBase(exports.getAPIBaseURL())
@@ -138,7 +138,7 @@ export default plugin({
         },
       ),
       () => {
-        tokenModule = undefined
+        tokenModules.clear()
         requestVoiceMessageFlow = undefined
         reportPluginError = error => console.error('[CustomVoiceMessages]', error)
       },
@@ -193,18 +193,7 @@ function VoiceMessageFlowHost() {
         if (!prepared) throw new Error('The audio converter returned no prepared file.')
         validatePreparedAudio(prepared)
         showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Audio prepared. Uploading voice message…')
-        let lastUploadBucket = -10
-        let lastUploadToastAt = 0
-        sendResult = await uploadAndSendVoiceMessage(channelId, prepared, fraction => {
-          const percent = Math.round(Math.max(0, Math.min(1, fraction)) * 100)
-          const bucket = Math.floor(percent / 10) * 10
-          const heartbeatDue = Date.now() - lastUploadToastAt >= 2_000
-          if (bucket >= lastUploadBucket + 10 || heartbeatDue) {
-            lastUploadBucket = bucket
-            lastUploadToastAt = Date.now()
-            showVoiceMessageToast(PROGRESS_TOAST_KEY, `Uploading voice message · ${bucket}%`)
-          }
-        })
+        sendResult = await uploadAndSendVoiceMessage(channelId, prepared)
       } finally {
         if (prepared && typeof prepared.uri === 'string') {
           await callNativeMethod(`${PLUGIN_ID}.cleanupPrepared`, [prepared.uri]).catch(error => {
@@ -403,11 +392,23 @@ async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudi
 async function uploadAndSendVoiceMessage(
   channelId: string,
   audio: PreparedAudio,
-  onUploadProgress: (fraction: number) => void,
 ): Promise<{ verifiedVoiceMessage: boolean }> {
-  const token = tokenModule?.getToken()
-  if (!token) throw new Error('Discord authentication is not available.')
+  const url = `${apiBase}/channels/${encodeURIComponent(channelId)}/messages`
+  const message = await postMultipartMessage(url, audio)
+  const attachment = message.attachments?.[0]
+  const verifiedVoiceMessage =
+    typeof message.flags === 'number' &&
+    (message.flags & VOICE_MESSAGE_FLAG) !== 0 &&
+    typeof attachment?.duration_secs === 'number' &&
+    Number.isFinite(attachment.duration_secs) &&
+    attachment.duration_secs > 0 &&
+    typeof attachment.waveform === 'string' &&
+    attachment.waveform.length > 0
 
+  return { verifiedVoiceMessage }
+}
+
+function createVoiceMessageFormData(audio: PreparedAudio): FormData {
   const body = new FormData()
   body.append('payload_json', JSON.stringify({
     flags: VOICE_MESSAGE_FLAG,
@@ -425,55 +426,55 @@ async function uploadAndSendVoiceMessage(
     name: audio.filename,
     type: audio.mimeType,
   } as unknown as Blob)
-
-  const url = `${apiBase}/channels/${encodeURIComponent(channelId)}/messages`
-  const message = await postMultipartMessage(url, token, body, onUploadProgress)
-  const attachment = message.attachments?.[0]
-  const verifiedVoiceMessage =
-    typeof message.flags === 'number' &&
-    (message.flags & VOICE_MESSAGE_FLAG) !== 0 &&
-    typeof attachment?.duration_secs === 'number' &&
-    Number.isFinite(attachment.duration_secs) &&
-    attachment.duration_secs > 0 &&
-    typeof attachment.waveform === 'string' &&
-    attachment.waveform.length > 0
-
-  return { verifiedVoiceMessage }
+  return body
 }
 
-function postMultipartMessage(
-  url: string,
-  token: string,
-  body: FormData,
-  onUploadProgress: (fraction: number) => void,
-): Promise<MessageLike> {
-  return new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest()
-    request.open('POST', url)
-    request.setRequestHeader('Authorization', token)
-    request.timeout = 120_000
-    request.upload.onprogress = event => {
-      if (event.lengthComputable && event.total > 0) {
-        onUploadProgress(Math.max(0, Math.min(1, event.loaded / event.total)))
-      }
+function getAvailableAuthTokens(): string[] {
+  const tokens = new Set<string>()
+  for (const module of tokenModules) {
+    try {
+      const token = module.getToken()
+      if (typeof token === 'string' && token.trim().length > 0) tokens.add(token)
+    } catch (error) {
+      console.warn('[CustomVoiceMessages] Could not read a Discord session token provider.', getErrorStack(error))
     }
-    request.onload = () => {
-      if (request.status < 200 || request.status >= 300) {
-        reject(new Error(`Discord returned HTTP ${request.status}: ${safeResponseMessage(request.responseText)}`))
-        return
-      }
-      try {
-        const parsed = JSON.parse(request.responseText) as MessageLike
-        resolve(parsed)
-      } catch (error) {
-        reject(new Error(`Discord returned an unreadable message response: ${getErrorMessage(error)}`))
-      }
+  }
+  return [...tokens]
+}
+
+async function postMultipartMessage(url: string, audio: PreparedAudio): Promise<MessageLike> {
+  const tokens = getAvailableAuthTokens()
+  if (tokens.length === 0) {
+    throw new Error("Discord's session token is unavailable. Restart Discord and try again.")
+  }
+
+  let unauthorizedResponse = ''
+  for (let index = 0; index < tokens.length; index++) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: tokens[index] },
+      body: createVoiceMessageFormData(audio),
+    })
+    const responseText = await response.text()
+
+    if (response.status === 401) {
+      unauthorizedResponse = responseText
+      continue
     }
-    request.onerror = () => reject(new Error('The voice-message upload failed because of a network error. Check the channel before retrying.'))
-    request.ontimeout = () => reject(new Error('The voice-message upload timed out. Check the channel before retrying to avoid a duplicate.'))
-    request.onabort = () => reject(new Error('The voice-message upload was cancelled.'))
-    request.send(body)
-  })
+    if (!response.ok) {
+      throw new Error(`Discord returned HTTP ${response.status}: ${safeResponseMessage(responseText)}`)
+    }
+
+    try {
+      return JSON.parse(responseText) as MessageLike
+    } catch (error) {
+      throw new Error(`Discord returned an unreadable message response: ${getErrorMessage(error)}`)
+    }
+  }
+
+  throw new Error(
+    `Discord rejected all ${tokens.length} available session token(s) with HTTP 401: ${safeResponseMessage(unauthorizedResponse)}. Fully restart Discord and sign in again to refresh its session.`,
+  )
 }
 
 function safeResponseMessage(responseText: string): string {
@@ -541,9 +542,8 @@ type AttachmentPickerMenuItem = {
 let pickerMenuInjectionReported = false
 
 /**
- * Discord's plus-button menu is a ContextMenu rendered by ChatInputActions,
- * not a Design.ActionSheet. Its props.items entries have label, IconComponent,
- * and action fields. Patch that data array before React renders the menu.
+ * Add the voice-message entry to Discord's chat composer plus-button menu.
+ * Its props.items entries have label, IconComponent, and action fields.
  */
 function addVoiceMessagePlusMenuOption(tree: ReactNode): ReactNode {
   const items = findAttachmentPickerMenuItems(tree)
