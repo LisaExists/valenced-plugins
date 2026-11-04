@@ -61,6 +61,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/tag-releases.sh
-
-      - name: Publish the GitHub Pages frontend
-        run: bash .github/scripts/publish-site.sh

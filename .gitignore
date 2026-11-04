@@ -13,6 +13,3 @@ node_modules/
 .DS_Store
 .idea/
 *.iml
-
-# Generated from the published pool; never commit a snapshot on main.
-site/index.json
