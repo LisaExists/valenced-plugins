@@ -38,6 +38,3 @@ jobs:
 
       - name: Regenerate and publish index.json
         run: .github/scripts/regenerate-index.sh
-
-      - name: Publish the GitHub Pages frontend
-        run: bash .github/scripts/publish-site.sh
