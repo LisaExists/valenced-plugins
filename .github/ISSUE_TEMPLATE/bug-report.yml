@@ -1,0 +1,92 @@
+name: Bug report
+description: Report a reproducible problem with a Valenced plugin. Relevant logs are required.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Include the affected plugin, exact versions, reproduction steps, and relevant logs.
+
+        **Logs are required.** Paste the relevant output below or use the upload field for a log file. Remove tokens, passwords, session IDs, email addresses, and other private information before submitting.
+  - type: input
+    id: plugin
+    attributes:
+      label: Affected plugin
+      description: Enter the plugin name or ID. Use "Other / repository-wide" for issues not tied to a specific plugin.
+      placeholder: lisaexists.custom-voice-messages
+    validations:
+      required: true
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+      placeholder: "1.2.3"
+  - type: input
+    id: valenced_version
+    attributes:
+      label: Valenced version
+      placeholder: "1.0.0"
+  - type: input
+    id: discord_version
+    attributes:
+      label: Discord version
+      placeholder: "355.0"
+  - type: input
+    id: environment
+    attributes:
+      label: Device and operating system
+      placeholder: "Android 16 · Galaxy S23"
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behaviour and when it occurs.
+      placeholder: Include any visible error messages.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps that trigger the problem.
+      placeholder: |
+        1. Open …
+        2. Navigate to …
+        3. Tap …
+        4. Observe …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen?
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (required)
+      description: Paste the relevant log output, including the error and surrounding lines. If no error is logged, explain what you checked. For very long logs, use the upload field below.
+      placeholder: Paste logs here. Do not include secrets or authentication tokens.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: attachments
+    attributes:
+      label: Links to additional logs, screenshots, or recordings
+      description: Optional links to supporting material.
+      placeholder: "https://…"
+  - type: upload
+    id: uploads
+    attributes:
+      label: Upload log files or screenshots
+      description: Optional. Attach files directly to this report.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Privacy check
+      options:
+        - label: I checked all logs and attachments for tokens, passwords, session IDs, and other private information.
+          required: true
