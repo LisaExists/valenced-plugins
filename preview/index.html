@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#100d18">
+  <meta name="description" content="Browse plugins for Valenced, request new ideas, and report problems.">
+  <title>Lisa's Plugins — Valenced Repository</title>
+  <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="Lisa's Plugins home">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><path d="M24 5.5c2.2 8 5.9 11.6 13.9 13.8-8 2.2-11.7 5.9-13.9 13.9-2.2-8-5.8-11.7-13.8-13.9C18.2 17.1 21.8 13.5 24 5.5Z" fill="currentColor"/><path d="M38.5 31.5c1.2 4.3 3.2 6.3 7.5 7.5-4.3 1.2-6.3 3.2-7.5 7.5-1.2-4.3-3.2-6.3-7.5-7.5 4.3-1.2 6.3-3.2 7.5-7.5Z" fill="currentColor" opacity=".7"/><circle cx="9" cy="37" r="2.1" fill="currentColor" opacity=".75"/></svg></span>
+      <span class="brand-copy"><strong>lisa<span>.</span>plugins</strong><small>VALENCED REPOSITORY</small></span>
+    </a>
+    <nav class="main-nav" aria-label="Main navigation"><a href="#plugins">Explore</a><a href="#requests">Requests</a><a href="#issues">Issues</a></nav>
+    <button class="button button-small button-outline" id="copy-repo" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 6V4.8A1.8 1.8 0 0 1 8.8 3h7.4A1.8 1.8 0 0 1 18 4.8v7.4a1.8 1.8 0 0 1-1.8 1.8H15M4.8 7h7.4A1.8 1.8 0 0 1 14 8.8v7.4a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 16.2V8.8A1.8 1.8 0 0 1 4.8 7Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Copy repo URL</span></button>
+    <button class="mobile-menu" id="mobile-menu" type="button" aria-label="Open navigation" aria-expanded="false"><span></span><span></span></button>
+  </header>
+
+  <main id="top">
+    <section class="hero page-width">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-dot"></span> A LITTLE EXTRA MAGIC FOR VALENCED</div>
+        <h1>Make your Discord<br><span>feel like yours.</span></h1>
+        <p class="hero-text">Small plugins, quality-of-life tweaks, and experiments for Valenced. Find something useful, or tell me what you'd love to see next.</p>
+        <div class="hero-actions"><a class="button button-primary" href="#plugins">Explore plugins <span>↗</span></a><a class="button button-quiet" href="#requests">Suggest an idea <span>✳</span></a></div>
+        <div class="hero-footnote"><span class="sparkle">✦</span> Made with curiosity, caffeine, and a little bit of chaos.</div>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="orbit orbit-large"></div><div class="orbit orbit-small"></div><div class="hero-glow"></div>
+        <div class="hero-tile tile-back"><span>✿</span></div>
+        <div class="hero-tile tile-front"><div class="tile-top"><span class="tile-dot"></span><span class="tile-dot"></span><span class="tile-dot"></span><i>plugin.json</i></div><div class="tile-symbol">✧</div><div class="tile-caption">a little more you<span>_</span></div></div>
+        <span class="float-star star-one">✦</span><span class="float-star star-two">✧</span><span class="float-star star-three">✳</span>
+      </div>
+    </section>
+
+    <section class="stats page-width" aria-label="Repository statistics">
+      <div class="stat"><span class="stat-value" id="plugin-count">—</span><span class="stat-label">available plugins</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat"><span class="stat-value" id="version-count">—</span><span class="stat-label">published versions</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat stat-status"><span class="status-pulse"></span><span class="stat-label" id="catalog-status">Connecting to repository…</span></div>
+      <a class="stat-link" href="./index.json" data-catalog-index target="_blank" rel="noreferrer">View repository index <span>↗</span></a>
+    </section>
+
+    <section class="section page-width" id="plugins">
+      <div class="section-heading"><div><div class="section-kicker">THE COLLECTION</div><h2>Find your next <span>favourite.</span></h2><p class="section-description">Everything published here, in one place.</p></div><a class="text-link" data-repo-link="/tree/main/plugins" href="#">Browse source <span>↗</span></a></div>
+      <div class="catalog-tools">
+        <label class="search-box" for="plugin-search"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.8" cy="8.8" r="5.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m13.2 13.2 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><input id="plugin-search" type="search" placeholder="Search plugins…" autocomplete="off"><kbd>/</kbd></label>
+        <label class="sort-control" for="plugin-sort"><span>Sort by</span><select id="plugin-sort"><option value="name">Name</option><option value="updated">Latest version</option></select></label>
+      </div>
+      <div class="plugin-grid" id="plugin-grid" aria-live="polite"><div class="loading-card"><span class="spinner"></span><p>Fetching the good stuff…</p></div></div>
+      <div class="catalog-error" id="catalog-error" hidden><span class="error-icon">☁</span><strong>Couldn't reach the plugin index.</strong><p>The catalogue will appear once this repository has published its first release.</p><button class="button button-outline button-small" id="retry-catalog" type="button">Try again</button></div>
+    </section>
+
+    <section class="request-band page-width" id="requests">
+      <div class="request-decoration" aria-hidden="true">✳</div>
+      <div class="request-copy"><div class="section-kicker">GOT AN IDEA?</div><h2>Wish a plugin <span>existed?</span></h2><p>Tell me what would make your Valenced setup a little better. A small quality-of-life fix or a completely wild idea — both welcome.</p></div>
+      <div class="request-action"><button class="button button-primary" type="button" data-open-dialog="request-dialog">Request a plugin <span>↗</span></button><small>Opens a pre-filled GitHub issue</small></div>
+    </section>
+
+    <section class="section support-section page-width" id="issues">
+      <div class="section-heading"><div><div class="section-kicker">LET'S MAKE IT BETTER</div><h2>Found a <span>little gremlin?</span></h2><p class="section-description">Report bugs or check on an existing issue.</p></div></div>
+      <div class="support-grid">
+        <article class="support-card"><div class="support-icon bug-icon">⌁</div><div><h3>Report a problem</h3><p>Something broke, looks odd, or doesn't behave as expected? Share the details so I can investigate.</p><button class="text-link button-link" type="button" data-open-dialog="issue-dialog">Submit an issue <span>↗</span></button></div></article>
+        <article class="support-card"><div class="support-icon github-icon">⌘</div><div><h3>Issue tracker</h3><p>See reported bugs, plugin ideas, and their progress in the repository.</p><a class="text-link" data-repo-link="/issues" href="#">View GitHub issues <span>↗</span></a></div></article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><div class="footer-inner page-width"><a class="brand footer-brand" href="#top"><span class="brand-mark">✳</span><span class="brand-copy"><strong>lisa<span>.</span>plugins</strong><small>MADE FOR VALENCED</small></span></a><p>Made with care by Lisa <span class="footer-heart">♡</span></p><div class="footer-links"><a data-repo-link="" href="#">GitHub</a><a href="./index.json" target="_blank" rel="noreferrer">Index JSON</a><a href="#top">Back to top ↑</a></div></div></footer>
+
+    <dialog class="form-dialog" id="request-dialog">
+    <form class="dialog-panel" id="request-form">
+      <button class="dialog-close" type="button" aria-label="Close" data-close-dialog>×</button>
+      <div class="section-kicker">NEW PLUGIN IDEA</div>
+      <h2>Let's hear it<span>.</span></h2>
+      <p class="dialog-intro">A little context helps me turn your idea into something useful. Required fields are marked.</p>
+
+      <label class="field-label" for="request-type">Request category <em>required</em></label>
+      <select class="field" id="request-type" name="type" required>
+        <option value="" selected disabled>Choose a category…</option>
+        <option value="Quality of life">Quality of life</option>
+        <option value="Appearance and customization">Appearance and customization</option>
+        <option value="Integrations and compatibility">Integrations and compatibility</option>
+        <option value="Accessibility">Accessibility</option>
+        <option value="Developer tools">Developer tools</option>
+        <option value="Other">Other</option>
+      </select>
+
+      <label class="field-label" for="request-name">Plugin name <em>required</em></label>
+      <input class="field" id="request-name" name="name" required maxlength="90" placeholder="A short, descriptive name">
+
+      <label class="field-label" for="request-problem">What problem should it solve? <em>required</em></label>
+      <textarea class="field" id="request-problem" name="problem" required minlength="20" maxlength="1200" rows="3" placeholder="What is frustrating or missing in Valenced right now?"></textarea>
+
+      <label class="field-label" for="request-description">What should the plugin do? <em>required</em></label>
+      <textarea class="field" id="request-description" name="description" required minlength="20" maxlength="1600" rows="4" placeholder="Describe the behaviour, settings, or workflow you have in mind."></textarea>
+
+      <label class="field-label" for="request-use-case">Example use case <span>optional</span></label>
+      <textarea class="field" id="request-use-case" name="useCase" maxlength="800" rows="2" placeholder="When would you use it? What would the ideal result look like?"></textarea>
+
+      <label class="field-label" for="request-related">Related plugin or feature <span>optional</span></label>
+      <input class="field" id="request-related" name="related" maxlength="160" placeholder="Existing plugin, Discord feature, or app">
+
+      <label class="field-label" for="request-reference">Reference or example link <span>optional</span></label>
+      <input class="field" id="request-reference" name="reference" type="url" maxlength="500" placeholder="https://…">
+
+      <label class="check-row" for="request-searched">
+        <input id="request-searched" name="searched" type="checkbox" required>
+        <span>I checked the plugin catalogue and existing requests for a similar idea.</span>
+      </label>
+
+      <div class="dialog-actions">
+        <button class="button button-quiet" type="button" data-close-dialog>Cancel</button>
+        <button class="button button-primary" type="submit">Continue to GitHub ↗</button>
+      </div>
+      <p class="dialog-note">Your answers will be pre-filled in a GitHub issue form for final review.</p>
+    </form>
+  </dialog>
+
+  <dialog class="form-dialog" id="issue-dialog">
+    <form class="dialog-panel" id="issue-form">
+      <button class="dialog-close" type="button" aria-label="Close" data-close-dialog>×</button>
+      <div class="section-kicker">BUG REPORT</div>
+      <h2>Let's track it <span>down.</span></h2>
+      <p class="dialog-intro">Useful reports include a reproducible example, version details, and logs. Logs are required so issues can be investigated properly.</p>
+
+      <label class="field-label" for="issue-plugin">Affected plugin <em>required</em></label>
+      <select class="field" id="issue-plugin" name="plugin" required>
+        <option value="" selected disabled>Choose a plugin…</option>
+        <option value="Other / repository-wide">Other / repository-wide</option>
+      </select>
+
+      <label class="field-label" for="issue-title">Short summary <em>required</em></label>
+      <input class="field" id="issue-title" name="title" required maxlength="110" placeholder="What is broken?">
+
+      <div class="field-grid">
+        <div>
+          <label class="field-label" for="issue-plugin-version">Plugin version <span>optional</span></label>
+          <input class="field" id="issue-plugin-version" name="pluginVersion" maxlength="60" placeholder="e.g. 1.2.0">
+        </div>
+        <div>
+          <label class="field-label" for="issue-valenced-version">Valenced version <span>optional</span></label>
+          <input class="field" id="issue-valenced-version" name="valencedVersion" maxlength="60" placeholder="e.g. 1.0.0">
+        </div>
+        <div>
+          <label class="field-label" for="issue-discord-version">Discord version <span>optional</span></label>
+          <input class="field" id="issue-discord-version" name="discordVersion" maxlength="60" placeholder="e.g. 355.0">
+        </div>
+        <div>
+          <label class="field-label" for="issue-environment">Device / OS <em>required</em></label>
+          <input class="field" id="issue-environment" name="environment" required maxlength="120" placeholder="e.g. Android 16 · Galaxy S23">
+        </div>
+      </div>
+
+      <label class="field-label" for="issue-details">What happened? <em>required</em></label>
+      <textarea class="field" id="issue-details" name="details" required minlength="20" maxlength="1400" rows="3" placeholder="Describe the problem and what you saw."></textarea>
+
+      <label class="field-label" for="issue-steps">Steps to reproduce <em>required</em></label>
+      <textarea class="field" id="issue-steps" name="steps" required minlength="10" maxlength="1200" rows="3" placeholder="1. Open…&#10;2. Tap…&#10;3. Observe…"></textarea>
+
+      <label class="field-label" for="issue-expected">What did you expect to happen? <span>optional</span></label>
+      <textarea class="field" id="issue-expected" name="expected" maxlength="700" rows="2" placeholder="Describe the expected result."></textarea>
+
+      <label class="field-label" for="issue-logs">Logs <em>required</em></label>
+      <textarea class="field" id="issue-logs" name="logs" required minlength="20" maxlength="2800" rows="6" placeholder="Paste the relevant Valenced / plugin logs here. Include the error and surrounding lines. If no error is logged, explain which logs you checked."></textarea>
+      <p class="field-help">Please include actual log output, not just “it doesn't work”. For longer logs, use the GitHub upload field on the next screen. Remove tokens, passwords, session IDs, and other private data before sharing.</p>
+
+      <label class="field-label" for="issue-attachments">Link to additional logs, screenshots, or a recording <span>optional</span></label>
+      <input class="field" id="issue-attachments" name="attachments" type="url" maxlength="500" placeholder="https://…">
+
+      <label class="check-row" for="issue-redacted">
+        <input id="issue-redacted" name="redacted" type="checkbox" required>
+        <span>I checked my logs and attachments for tokens, passwords, session IDs, and other private information.</span>
+      </label>
+
+      <div class="dialog-actions">
+        <button class="button button-quiet" type="button" data-close-dialog>Cancel</button>
+        <button class="button button-primary" type="submit">Continue to GitHub ↗</button>
+      </div>
+      <p class="dialog-note">GitHub will open a structured report form with your answers pre-filled.</p>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
