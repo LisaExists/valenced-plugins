@@ -1,0 +1,60 @@
+name: Plugin request
+description: Suggest a new plugin with a clear use case and expected behaviour.
+title: "[Plugin request]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, check the current plugin catalogue and open requests to avoid duplicates. A clear problem statement and concrete example make requests much easier to evaluate.
+  - type: input
+    id: request_type
+    attributes:
+      label: Request category
+      description: What kind of feature is this?
+      placeholder: "Quality of life, appearance, integration, accessibility…"
+    validations:
+      required: true
+  - type: input
+    id: plugin_name
+    attributes:
+      label: Suggested plugin name
+      placeholder: "A short, descriptive name"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+      description: Explain what is currently difficult, missing, or frustrating.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What should the plugin do?
+      description: Describe the expected behaviour, settings, and workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Example use case
+      description: When would you use it, and what would the ideal result look like?
+  - type: input
+    id: related
+    attributes:
+      label: Related plugin or feature
+      description: Is this related to an existing plugin, Discord feature, or another app?
+  - type: input
+    id: reference
+    attributes:
+      label: References or examples
+      description: Link to screenshots, documentation, or similar implementations.
+      placeholder: "https://…"
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Duplicate check
+      options:
+        - label: I checked the plugin catalogue and existing requests for a similar idea.
+          required: true
