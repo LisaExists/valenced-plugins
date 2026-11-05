@@ -3,13 +3,7 @@ const POOL_BRANCH = "gh-pages";
 
 function getCatalogIndexUrl() {
   const host = window.location.hostname.toLowerCase();
-
-  if (host.endsWith(".github.io")) {
-    const project = window.location.pathname.split("/").filter(Boolean)[0];
-    const base = project ? `/${project}/` : "/";
-    return new URL("index.json", window.location.origin + base).href;
-  }
-
+  if (host.endsWith(".github.io")) return new URL("../index.json", document.baseURI).href;
   return `https://raw.githubusercontent.com/${DEFAULT_REPOSITORY}/${POOL_BRANCH}/index.json`;
 }
 
@@ -286,7 +280,7 @@ function getRepositoryPageUrl() {
     const [owner, repository] = DEFAULT_REPOSITORY.split("/");
     return `https://${owner.toLowerCase()}.github.io/${repository}/`;
   }
-  return new URL("./", document.baseURI).href;
+  return new URL("../", document.baseURI).href;
 }
 
 document.querySelector("#copy-repo").addEventListener("click", async () => {

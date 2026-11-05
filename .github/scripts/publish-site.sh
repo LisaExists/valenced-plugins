@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the static frontend beside index.json and the artifact pool.
+# Publish the static frontend under /website so the Pages root remains the repository index.
 set -euo pipefail
 
 # shellcheck source=.github/scripts/lib.sh
@@ -11,13 +11,17 @@ if [ ! -d "$SITE_ROOT" ]; then
     exit 1
 fi
 
-# Copy only frontend files. Keep index.json and pool/ generated from the actual releases.
-cp "$SITE_ROOT/index.html" "$POOL_CHECKOUT/index.html"
-cp "$SITE_ROOT/styles.css" "$POOL_CHECKOUT/styles.css"
-cp "$SITE_ROOT/app.js" "$POOL_CHECKOUT/app.js"
-mkdir -p "$POOL_CHECKOUT/assets"
-cp -R "$SITE_ROOT/assets/." "$POOL_CHECKOUT/assets/"
-touch "$POOL_CHECKOUT/.nojekyll"
+WEBSITE_ROOT="$POOL_CHECKOUT/website"
+mkdir -p "$WEBSITE_ROOT/assets"
 
-git -C "$POOL_CHECKOUT" add index.html styles.css app.js assets .nojekyll
-commit_pool "GitHub Pages frontend already up to date." "Publish GitHub Pages frontend"
+cp "$SITE_ROOT/index.html" "$WEBSITE_ROOT/index.html"
+cp "$SITE_ROOT/styles.css" "$WEBSITE_ROOT/styles.css"
+cp "$SITE_ROOT/app.js" "$WEBSITE_ROOT/app.js"
+cp -R "$SITE_ROOT/assets/." "$WEBSITE_ROOT/assets/"
+
+# Older versions published the frontend at the Pages root. Remove those files so
+# / continues to resolve to the generated index.json expected by Valenced.
+rm -f "$POOL_CHECKOUT/index.html" "$POOL_CHECKOUT/styles.css" "$POOL_CHECKOUT/app.js"
+
+git -C "$POOL_CHECKOUT" add -A
+commit_pool "GitHub Pages frontend already up to date." "Publish GitHub Pages frontend under /website"

@@ -419,3 +419,32 @@ adb reverse tcp:8080 tcp:8080
 
 The server rescans the dist folder on every index request.
 Bump a manifest version, rebuild that plugin, and check for updates on the device. The new version will appear.
+
+
+## Website
+
+The `site/` directory contains the static GitHub Pages frontend for browsing published plugins,
+requesting new plugins, and reporting bugs. The frontend is published under `/website/` on the
+`gh-pages` branch so the Pages root remains the generated `index.json` endpoint used by Valenced.
+
+The repository URL stays:
+`https://<owner>.github.io/<repository>/`
+
+The website is available at:
+`https://<owner>.github.io/<repository>/website/`
+
+The catalogue index is generated from the published pool on `gh-pages`. The file is deliberately
+**not tracked on `main`**: release workflows regenerate it from `gh-pages/pool/` and keep it at
+the Pages root. The website loads that same root index from `../index.json`.
+
+Preview the frontend locally without installing the plugin build toolchain:
+
+```sh
+python3 -m http.server 8080 --directory site
+```
+
+Then open http://127.0.0.1:8080. A local preview reads the live public catalogue from the
+`gh-pages` branch. On GitHub Pages, the frontend reads the index from the parent directory.
+
+On GitHub Pages, issue and source links are derived from the project Pages URL. A local preview
+uses the public repository as its issue/source target.
