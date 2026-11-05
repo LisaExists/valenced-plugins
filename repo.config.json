@@ -1,5 +1,6 @@
 {
-	"name": "Lisa's Repository",
-	"description": "A collection of my sloppy ports :3",
-	"channels": {}
+  "name": "Lisa's Repository",
+  "description": "A collection of my sloppy ports :3",
+  "icon": "GlobeEarthIcon",
+  "channels": {}
 }
