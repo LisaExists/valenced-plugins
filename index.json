@@ -9,6 +9,7 @@
       "description": "Send audio files as Discord voice messages, including channels where file-picker actions are hidden.",
       "author": "LisaExists <836161010053283890>",
       "contributors": [
+        "bleelblep <119043674385547264>",
         "Dziurwa",
         "シグマ siguma"
       ],
@@ -74,8 +75,8 @@
         },
         "1.1.13": {
           "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.1.13.zip",
-          "sha256": "b510e2d05eb76d99a1d988485512545f24da4346ae5aa929f49635aefac34153",
-          "size": 45844,
+          "sha256": "00fb9f32966f85597b9ed2f629f8246b2f735e725623140dba8ac299627537cf",
+          "size": 45873,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
