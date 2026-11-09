@@ -2,6 +2,7 @@
   "format": 1,
   "name": "Lisa's Repository",
   "description": "A collection of my sloppy ports :3",
+  "icon": "PuzzlePieceIcon",
   "plugins": {
     "lisaexists.custom-voice-messages": {
       "name": "Custom Voice Messages",
@@ -13,7 +14,7 @@
       ],
       "icon": "MicrophoneIcon",
       "channels": {
-        "latest": "1.1.12"
+        "latest": "1.1.13"
       },
       "versions": {
         "1.0.0": {
@@ -62,6 +63,19 @@
           "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.1.12.zip",
           "sha256": "ba58c8551ce4592ce4a0c88a74fa667e8fb0c22ec2010c4047acdf39b80cb099",
           "size": 45822,
+          "dependencies": {
+            "valenced.api": {
+              "version": ">=1 <2"
+            },
+            "discord": {
+              "version": "*"
+            }
+          }
+        },
+        "1.1.13": {
+          "url": "https://lisaexists.github.io/valenced-plugins/pool/lisaexists.custom-voice-messages@1.1.13.zip",
+          "sha256": "b510e2d05eb76d99a1d988485512545f24da4346ae5aa929f49635aefac34153",
+          "size": 45844,
           "dependencies": {
             "valenced.api": {
               "version": ">=1 <2"
