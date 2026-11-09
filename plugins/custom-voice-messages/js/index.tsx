@@ -5,8 +5,6 @@ import { Stores } from '@valenced/discord/flux'
 import {
   getModuleWithImportedPath,
 } from '@valenced/discord/utils/modules/finders'
-import { getModules } from '@valenced/modules/finders'
-import { withProps } from '@valenced/modules/finders/filters'
 import { callNativeMethod } from '@valenced/modules/native'
 import { after } from '@valenced/patcher'
 import { getErrorStack } from '@valenced/utils/error'
@@ -27,9 +25,9 @@ import type {
   ReactNode,
 } from 'react'
 import SettingsComponent from './settings'
+import { sendVoiceMessage } from './upload'
 
 const PLUGIN_ID = 'lisaexists.custom-voice-messages'
-const VOICE_MESSAGE_FLAG = 1 << 13
 
 interface PickedAudio {
   uri: string
@@ -80,27 +78,8 @@ let progressToastState: ProgressToastState = {
 }
 const progressToastListeners = new Set<() => void>()
 
-interface TokenModule {
-  getToken(): string
-}
-
-interface ApiBaseModule {
-  getAPIBaseURL(): string
-  del: (...args: unknown[]) => unknown
-}
-
 interface SelectedChannelStore {
   getChannelId(): string | null | undefined
-}
-
-interface Attachment {
-  waveform?: string
-  duration_secs?: number
-}
-
-interface MessageLike {
-  flags?: number
-  attachments?: Attachment[]
 }
 
 type MutableElement = {
@@ -109,8 +88,6 @@ type MutableElement = {
 }
 
 const { Text: DesignText, Button: DesignButton } = Design
-let tokenModules = new Set<TokenModule>()
-let apiBase = 'https://discord.com/api/v9'
 let reportPluginError: (error: unknown) => void = error => console.error('[CustomVoiceMessages]', error)
 
 let requestVoiceMessageFlow: ((channelId: string) => boolean) | undefined
@@ -120,12 +97,6 @@ export default plugin({
     const { cleanup, plugin } = api
     reportPluginError = error => plugin.reportError(error)
     cleanup(
-      getModules(withProps<TokenModule>('getToken'), exports => {
-        tokenModules.add(exports)
-      }),
-      getModules(withProps<ApiBaseModule>('getAPIBaseURL', 'del'), exports => {
-        apiBase = normalizeApiBase(exports.getAPIBaseURL())
-      }),
       getModuleWithImportedPath<{ default: MemoExoticComponent<FC> }>(
         'modules/chat_input/native/action_buttons/ChatInputActions.tsx',
         ({ default: ChatInputActions }) => {
@@ -138,7 +109,6 @@ export default plugin({
         },
       ),
       () => {
-        tokenModules.clear()
         requestVoiceMessageFlow = undefined
         reportPluginError = error => console.error('[CustomVoiceMessages]', error)
       },
@@ -188,25 +158,27 @@ function VoiceMessageFlowHost() {
       showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Preparing audio for your voice message…')
       const prepared = await prepareAudioWithProgress(picked.uri)
 
-      let sendResult: { verifiedVoiceMessage: boolean }
+      // Discord's uploader owns the file once it has it: a failed message keeps Discord's own
+      // retry, which needs the file, so it is only deleted after Discord has posted the message.
+      // Leftovers are cleared by the converter's stale-file cleanup.
+      let deleteFile = true
       try {
         if (!prepared) throw new Error('The audio converter returned no prepared file.')
         validatePreparedAudio(prepared)
         showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Audio prepared. Uploading voice message…')
-        sendResult = await uploadAndSendVoiceMessage(channelId, prepared)
+        const delivery = sendVoiceMessage(channelId, prepared)
+        deleteFile = false
+        await delivery
+        deleteFile = true
       } finally {
-        if (prepared && typeof prepared.uri === 'string') {
+        if (deleteFile && prepared && typeof prepared.uri === 'string') {
           await callNativeMethod(`${PLUGIN_ID}.cleanupPrepared`, [prepared.uri]).catch(error => {
             reportPluginError(new Error(`Could not clean up the temporary converted audio file: ${getErrorStack(error)}`))
           })
         }
       }
 
-      if (sendResult.verifiedVoiceMessage) {
-        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Voice message sent.', 'success', FINAL_PROGRESS_TOAST_DURATION_MS)
-      } else {
-        showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Discord did not confirm the voice-message metadata. Check the channel before retrying.', 'critical', FINAL_PROGRESS_TOAST_DURATION_MS)
-      }
+      showVoiceMessageToast(PROGRESS_TOAST_KEY, 'Voice message sent.', 'success', FINAL_PROGRESS_TOAST_DURATION_MS)
     } catch (error) {
       reportPluginError(new Error(`Could not send voice message: ${getErrorStack(error)}`))
       showVoiceMessageToast(PROGRESS_TOAST_KEY, `Could not send voice message: ${getErrorMessage(error)}`, 'critical', 5_000)
@@ -386,136 +358,6 @@ async function prepareAudioWithProgress(sourceUri: string): Promise<PreparedAudi
     active = false
     clearInterval(heartbeat)
     await watcher
-  }
-}
-
-async function uploadAndSendVoiceMessage(
-  channelId: string,
-  audio: PreparedAudio,
-): Promise<{ verifiedVoiceMessage: boolean }> {
-  const url = `${apiBase}/channels/${encodeURIComponent(channelId)}/messages`
-  const message = await postMultipartMessage(url, audio)
-  const attachment = message.attachments?.[0]
-  const verifiedVoiceMessage =
-    typeof message.flags === 'number' &&
-    (message.flags & VOICE_MESSAGE_FLAG) !== 0 &&
-    typeof attachment?.duration_secs === 'number' &&
-    Number.isFinite(attachment.duration_secs) &&
-    attachment.duration_secs > 0 &&
-    typeof attachment.waveform === 'string' &&
-    attachment.waveform.length > 0
-
-  return { verifiedVoiceMessage }
-}
-
-function createVoiceMessageFormData(audio: PreparedAudio): FormData {
-  const body = new FormData()
-  body.append('payload_json', JSON.stringify({
-    flags: VOICE_MESSAGE_FLAG,
-    nonce: Date.now().toString(),
-    enforce_nonce: true,
-    attachments: [{
-      id: '0',
-      filename: audio.filename,
-      duration_secs: audio.durationSecs,
-      waveform: audio.waveform,
-    }],
-  }))
-  body.append('files[0]', {
-    uri: audio.uri,
-    name: audio.filename,
-    type: audio.mimeType,
-  } as unknown as Blob)
-  return body
-}
-
-function getAvailableAuthTokens(): string[] {
-  const tokens = new Set<string>()
-  for (const module of tokenModules) {
-    try {
-      const token = module.getToken()
-      if (typeof token === 'string' && token.trim().length > 0) tokens.add(token)
-    } catch (error) {
-      console.warn('[CustomVoiceMessages] Could not read a Discord session token provider.', getErrorStack(error))
-    }
-  }
-  return [...tokens]
-}
-
-async function postMultipartMessage(url: string, audio: PreparedAudio): Promise<MessageLike> {
-  const tokens = getAvailableAuthTokens()
-  if (tokens.length === 0) {
-    throw new Error("Discord's session token is unavailable. Restart Discord and try again.")
-  }
-
-  let unauthorizedResponse = ''
-  for (let index = 0; index < tokens.length; index++) {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { Authorization: tokens[index] },
-      body: createVoiceMessageFormData(audio),
-    })
-    const responseText = await response.text()
-
-    if (response.status === 401) {
-      unauthorizedResponse = responseText
-      continue
-    }
-    if (!response.ok) {
-      throw new Error(`Discord returned HTTP ${response.status}: ${safeResponseMessage(responseText)}`)
-    }
-
-    try {
-      return JSON.parse(responseText) as MessageLike
-    } catch (error) {
-      throw new Error(`Discord returned an unreadable message response: ${getErrorMessage(error)}`)
-    }
-  }
-
-  throw new Error(
-    `Discord rejected all ${tokens.length} available session token(s) with HTTP 401: ${safeResponseMessage(unauthorizedResponse)}. Fully restart Discord and sign in again to refresh its session.`,
-  )
-}
-
-function safeResponseMessage(responseText: string): string {
-  if (!responseText) return 'No error details were returned.'
-  try {
-    const data = JSON.parse(responseText) as {
-      message?: unknown
-      code?: unknown
-      errors?: unknown
-    }
-    const summary = typeof data.message === 'string' ? data.message : 'Discord rejected the request.'
-    const code = typeof data.code === 'number' || typeof data.code === 'string' ? ` (code ${data.code})` : ''
-    const details: string[] = []
-    collectValidationErrors(data.errors, '', details)
-    const suffix = details.length > 0 ? `: ${details.slice(0, 8).join('; ')}` : ''
-    return `${summary}${code}${suffix}`.slice(0, 1000)
-  } catch (error) {
-    console.warn('[CustomVoiceMessages] Could not parse upload error response', getErrorStack(error))
-  }
-  return responseText.slice(0, 1000)
-}
-
-function collectValidationErrors(value: unknown, path: string, output: string[], depth = 0): void {
-  if (!value || typeof value !== 'object' || depth > 8 || output.length >= 8) return
-  const record = value as Record<string, unknown>
-  const errors = record._errors
-  if (Array.isArray(errors)) {
-    for (const item of errors) {
-      if (!item || typeof item !== 'object') continue
-      const message = (item as { message?: unknown }).message
-      if (typeof message === 'string') {
-        output.push(`${path || 'request'}: ${message}`)
-        if (output.length >= 8) return
-      }
-    }
-  }
-  for (const [key, child] of Object.entries(record)) {
-    if (key === '_errors') continue
-    const childPath = path ? `${path}.${key}` : key
-    collectValidationErrors(child, childPath, output, depth + 1)
-    if (output.length >= 8) return
   }
 }
 
@@ -800,13 +642,6 @@ function shortConversionStage(stage: string): string {
   if (normalized.includes('decoding') || normalized.includes('encoding') || normalized.includes('converting')) return 'Converting audio'
   if (normalized.includes('inspect') || normalized.includes('starting') || normalized.includes('prepar')) return 'Preparing audio'
   return 'Preparing audio'
-}
-
-function normalizeApiBase(value: string): string {
-  let base = value.trim()
-  if (base.startsWith('//')) base = `https:${base}`
-  if (base.startsWith('http') && base.includes('/api/')) return base.replace(/\/+$/, '')
-  return 'https://discord.com/api/v9'
 }
 
 function getErrorMessage(error: unknown): string {
